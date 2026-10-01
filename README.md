@@ -26,20 +26,31 @@
 ```
 WeChatFerryTool/
 ├── README.md                  ← 本文档
-├── start.sh                   ← 一键启动（daemon + consumer）
+├── start.sh                   ← Git Bash 一键启动（daemon + 微信 + consumer）
 ├── stop.sh                    ← 停掉所有进程
-├── config.example.yaml        ← 配置模板（拷贝为 config.example 后填）
+├── requirements.txt           ← Python 依赖
+├── config.example.yaml        ← 配置模板
+├── .gitignore
 ├── consumer/
-│   ├── main.py                ← Python 主入口，连接 daemon
-│   ├── filter.py              ← 关键词/群/发送人白名单过滤
-│   ├── scorer.py              ← LLM 评分（DeepSeek/qwen-flash）
-│   ├── notifier.py            ← Bark 推送
+│   ├── __init__.py
+│   ├── main.py                ← WebSocket 连接 daemon，消息循环
+│   ├── filter.py              ← 群/发送人/关键词 白名单过滤
+│   ├── scorer.py              ← DeepSeek/qwen LLM 评分 1~5
+│   ├── notifier.py            ← Bark iOS 推送
 │   └── store.py               ← SQLite 落库
 ├── logs/                      ← 运行时日志（gitignore）
-├── data/                      ← SQLite 文件（gitignore）
-└── scripts/
-    └── check_wechat_version.ps1  ← 启动前校验微信版本
+└── data/                      ← SQLite 文件（gitignore）
 ```
+
+## 模块职责
+
+| 文件 | 职责 | 改它的时机 |
+|------|------|-----------|
+| `consumer/main.py` | WebSocket 客户端；串联各模块；信号处理 | 改协议解析、加批处理、加新事件类型 |
+| `consumer/filter.py` | 纯函数：判定是否入库 | 调整匹配规则 |
+| `consumer/scorer.py` | 调 LLM；prompt 模板；解析输出 | 调整评分标准 |
+| `consumer/notifier.py` | 推 Bark | 接新通道（飞书/企微/邮件） |
+| `consumer/store.py` | SQLite CRUD | 加表、加查询、改字段 |
 
 ## 第一步：Windows 上装基础依赖
 
@@ -251,6 +262,52 @@ python -m consumer.main
 - consumer 日志打印 "received msg from group X"
 - SQLite 里写入一条记录
 - 调 LLM 评分，假设评分 >=4，Bark 收到推送
+
+## 调试技巧
+
+### 查看最近入库的消息
+
+```bash
+# 用 sqlite3 命令行（Win 上需要安装 sqlite3 或用 DB Browser for SQLite）
+sqlite3 data/messages.db "SELECT id, group_name, sender, substr(content,1,50), score, pushed FROM messages ORDER BY received_at DESC LIMIT 20"
+```
+
+或者写个小脚本 `scripts/dump.py`：
+```python
+from consumer.store import Store
+s = Store("data/messages.db")
+for row in s.recent(20):
+    print(f"[{row['received_at']}] {row['group_name']} {row['sender']}: {row['content'][:50]} (score={row['score']})")
+```
+
+### 常见故障
+
+| 现象 | 原因 | 排查 |
+|------|------|------|
+| 微信启动后立即闪退 | 微信版本与 WechatFerry 不兼容 | 检查 WechatFerry README 列出的支持版本 |
+| daemon 启动报 "injection failed" | 没以管理员权限运行 | 用管理员 PowerShell 重启 daemon |
+| consumer 报 "Connection refused" | daemon 没起来，或端口不对 | 看 `wcf.exe --help`，检查防火墙 8888 端口 |
+| 消息一直不来 | WebSocket 订阅类型不对 | 看 daemon 文档的"消息事件"协议 |
+| 评分全是 3 分（score_failed） | LLM API key 错或网络问题 | 看 logs/consumer.log 里的 `score_failed:` 行 |
+| Bark 推送不到 | key 是 REPLACE_ME / key 错 / server 错 | 先用 curl 直接测： `curl https://api.day.app/<key>/test/测试` |
+
+### 单独测试某个模块
+
+```powershell
+# 测过滤器
+python -c "from consumer.filter import Filter, FilterConfig; f=Filter(FilterConfig(groups=['项目群'], senders=[], keywords=['报价'])); print(f.match(group_name='项目群', sender='X', content='新报价 1000'))"
+
+# 测评分
+python -c "from consumer.scorer import Scorer, ScorerConfig; s=Scorer(ScorerConfig(base_url='...', api_key='...', model='deepseek-chat')); print(s.score(group_name='X', sender='Y', content='付款今天必须到'))"
+```
+
+### 临时关掉推送（只想看落库）
+
+```yaml
+# config.yaml
+bark:
+  enabled: false
+```
 
 ## 第七步：日常运维
 
