@@ -1,0 +1,37 @@
+# WechatFerry daemon 连接
+wcf:
+  ws_url: ws://127.0.0.1:8888
+
+# 过滤规则
+filter:
+  # 白名单群（只监听这些群），空数组 = 全部群都监听
+  groups:
+    - "客户 A 项目群"
+    - "项目 X 内部讨论"
+  # 白名单发送人（群里只关心这些人的消息），空数组 = 群里所有发送人
+  senders: []
+  # 关键词命中（任一命中就入库）
+  keywords:
+    - "报价"
+    - "合同"
+    - "付款"
+    - "deadline"
+    - "@bobo"
+
+# LLM 评分
+llm:
+  base_url: https://api.deepseek.com/v1
+  api_key: REPLACE_ME
+  model: deepseek-chat
+  # 评分阈值，>= threshold 的会推送通知
+  push_threshold: 4
+
+# 推送通道
+bark:
+  enabled: true
+  server: https://api.day.app
+  key: REPLACE_ME
+
+# 存储
+storage:
+  sqlite_path: data/messages.db
