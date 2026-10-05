@@ -1,4 +1,4 @@
-# WeChatFerry 二次开发方案（Windows 裸金属）
+# WeChatFerryTool（Windows 裸金属）
 
 ## 目标
 
@@ -6,38 +6,56 @@
 
 ```
 [Windows 微信 PC 客户端]
-        ↓ dll 注入
-[WechatFerry daemon]              ← 默认监听 8888 端口，WebSocket
+        ↓ dll 注入（version.dll 代理）
+[aixed/WeChat-Hook DLL]              ← 默认监听 30001 端口，HTTP
         ↓
-[Python 消费脚本]                ← 连接 daemon，过滤 + 评分 + 落库
-        ├→ SQLite 持久化（所有命中规则的消息）
-        ├→ DeepSeek/qwen-flash 评分（1~5 分）
-        └→ 评分 ≥4 的推送 Bark
+        ↓ POST /hook/callback（消息推送）
+        ↓
+[Python consumer（HTTP server）]   ← 监听 8888，接收回调
+        ├→ 过滤（filter.py）
+        ├→ SQLite 落库（store.py）
+        ├→ DeepSeek/qwen 评分（scorer.py）
+        └→ 评分 ≥4 推送 Bark（notifier.py）
 ```
+
+## 配套版本
+
+| 组件 | 版本 |
+|------|------|
+| 微信 PC 客户端 | **4.1.10.27**（aixed DLL 锁定的版本） |
+| aixed/WeChat-Hook | v4.1.10.27（从 https://github.com/aixed/WeChat-Hook/releases 下载 `version.dll`） |
+| Python | 3.11+ 64-bit |
+| 操作系统 | Windows 10 1909+ / Windows 11 |
+
+⚠️ 微信版本必须锁在 4.1.10.27。新版微信会让 DLL 的 hook 偏移失效，导致收不到消息。
 
 ## 与现有项目的关系
 
-- `WeChatBridge`（已克隆到 `/Users/bobo/projects/WeChatBridge`）：不参与本方案。本方案是独立的"实时监听 + 过滤"工具
-- 本方案作为 `WeChatFerryTool` 子项目，路径 `/Users/bobo/projects/WeChatFerryTool`
-- **不要把 WechatFerry 的 dll / daemon 代码混入仓库**（微信协议二进制敏感，作者未明确许可证的部分不要 commit）
+- 本方案作为 `WeChatFerryTool` 子项目，路径 `D:\projects\WeChatFerryTool`
+- 配套微信需要降级到 4.1.10.27（不能用 4.1.13+ 等更新版本）
+- **不要把 `version.dll` 提交到仓库**（虽然开源，但作者未明确许可证要求）
 
 ## 目录结构
 
 ```
 WeChatFerryTool/
 ├── README.md                  ← 本文档
-├── start.sh                   ← Git Bash 一键启动（daemon + 微信 + consumer）
-├── stop.sh                    ← 停掉所有进程
+├── start.sh                   ← Git Bash 一键启动（微信 + consumer）
+├── stop.sh                    ← 停掉所有进程（按 PID 精确停止）
 ├── requirements.txt           ← Python 依赖
 ├── config.example.yaml        ← 配置模板
 ├── .gitignore
 ├── consumer/
 │   ├── __init__.py
-│   ├── main.py                ← WebSocket 连接 daemon，消息循环
+│   ├── main.py                ← HTTP server 接收回调，串联各模块
+│   ├── hook_client.py         ← 对 127.0.0.1:30001 DLL HTTP API 的封装
 │   ├── filter.py              ← 群/发送人/关键词 白名单过滤
 │   ├── scorer.py              ← DeepSeek/qwen LLM 评分 1~5
 │   ├── notifier.py            ← Bark iOS 推送
 │   └── store.py               ← SQLite 落库
+├── scripts/
+│   ├── test_hook.py           ← 测试 DLL 的探针（可单独跑）
+│   └── inject_dll.ps1         ← 备用：远程线程注入 DLL（仅 4.1.13.65 验证用）
 ├── logs/                      ← 运行时日志（gitignore）
 └── data/                      ← SQLite 文件（gitignore）
 ```
@@ -46,7 +64,8 @@ WeChatFerryTool/
 
 | 文件 | 职责 | 改它的时机 |
 |------|------|-----------|
-| `consumer/main.py` | WebSocket 客户端；串联各模块；信号处理 | 改协议解析、加批处理、加新事件类型 |
+| `consumer/main.py` | HTTP server 接收 DLL 回调；串联各模块；信号处理；启动期注册回调 | 加批处理、加新事件类型、改消息循环 |
+| `consumer/hook_client.py` | 对 DLL HTTP API 的封装（status/set_callback/GetSelfProfile） | 加新 DLL endpoint |
 | `consumer/filter.py` | 纯函数：判定是否入库 | 调整匹配规则 |
 | `consumer/scorer.py` | 调 LLM；prompt 模板；解析输出 | 调整评分标准 |
 | `consumer/notifier.py` | 推 Bark | 接新通道（飞书/企微/邮件） |
@@ -60,13 +79,13 @@ WeChatFerryTool/
 - 建议 **64-bit**，8GB+ 内存
 - 微信 PC 客户端必须能正常登录（即这台机器上你常用微信）
 
-### 1.2 安装微信 PC 客户端
+### 1.2 安装微信 PC 客户端（必须 4.1.10.27）
 
 **版本锁定是关键**，否则 dll 注入会因为协议变化失效。
 
 1. 卸载现有的微信 PC（如果装了）
-2. 去 [WechatFerry README](https://github.com/lich0821/WeChatFerry) 看当前支持的微信版本号（通常会写 `3.9.12.xx` 之类的）
-3. 找对应的离线安装包安装
+2. 去 [aixed/WeChat-Hook Releases](https://github.com/aixed/WeChat-Hook/releases/tag/v4.1.10.27) 下载 `WeChatWin_4.1.10.27.exe`（约 233 MB）
+3. 安装这个 4.1.10.27 的安装包（不是最新版）
 4. 登录你的微信，**关闭自动更新**：
    - 设置 → 通用 → 关闭"自动更新微信"
    - 卸载 `WeChatUpdate.exe`（位于微信安装目录）
@@ -126,39 +145,32 @@ ssh -T git@github.com
 
 看到 "Hi username! You've successfully authenticated..." 就 OK。
 
-## 第三步：装 WechatFerry daemon
+## 第三步：装 aixed/WeChat-Hook DLL
 
-### 3.1 下载 release
+### 3.1 下载 DLL
 
-去 [WechatFerry Releases](https://github.com/lich0821/WeChatFerry/releases) 下载最新 `WeChatFerry.zip`。
+去 [aixed/WeChat-Hook Releases v4.1.10.27](https://github.com/aixed/WeChat-Hook/releases/tag/v4.1.10.27) 下载 `version.dll`（约 472 KB）。
 
-解压到固定目录，例如 `C:\tools\WeChatFerry\`。
+### 3.2 放到 WeChat 安装目录
 
-### 3.2 启动 daemon
+把 `version.dll` 复制到微信 PC 的安装目录，例如 `C:\Program Files\Tencent\Weixin\`。
 
-以**管理员身份**运行（注入 dll 需要权限）：
+注意：
+- **不要覆盖** `C:\Windows\System32\version.dll`（那是系统 DLL，会让 Windows 整个崩）
+- 这一步需要**管理员权限**（右键 PowerShell → "以管理员身份运行"）
+- **关闭杀毒软件**（360 / 火绒 / Defender 经常误报 dll）
 
-```powershell
-cd C:\tools\WeChatFerry
-.\wcf.exe --help     # 看参数
-.\wcf.exe            # 默认启动，监听 0.0.0.0:8888
+### 3.3 验证 DLL 自动加载
+
+启动微信（你刚才装的 4.1.10.27），扫码登录。
+
+DLL 加载成功的标志：在浏览器访问 `http://127.0.0.1:30001/QueryDB/status`，看到 `{"IsLogin": 0, "hWeixin": ...}` 之类的 JSON（IsLogin 即使是 0 也说明 DLL 起来了，登录状态它有时候读不对，但 hook 已经生效）。
+
+如果微信闪退，立刻：
+```cmd
+del "C:\Program Files\Tencent\Weixin\version.dll"
 ```
-
-**注意**：daemon 启动时**不要打开微信**。先启动 daemon，再开微信，否则 dll 注入不到。
-
-启动成功的标志：看到 `WeChatFerry is ready` 类似的日志。
-
-### 3.3 验证 daemon
-
-另开一个终端：
-
-```powershell
-# 用任意 WebSocket 客户端连 8888 测试
-# 或者装个 Python 测试
-python -c "import websocket; print('ok')"
-```
-
-如果 daemon 启动后微信打开时没有崩溃弹窗（注入失败通常会让微信闪退），那就 OK。
+回滚。
 
 ## 第四步：装 Python 依赖
 
@@ -180,86 +192,73 @@ openai>=1.0.0  # DeepSeek/qwen 都兼容 OpenAI SDK
 
 ## 第五步：写配置
 
-复制 `config.example.yaml` 为 `config.yaml`：
+复制 `config.example.yaml` 为 `config.yaml`，根据需要修改：
 
 ```yaml
-# WechatFerry daemon 连接
-wcf:
-  ws_url: ws://127.0.0.1:8888
+hook:
+  api_base: http://127.0.0.1:30001
+  callback_host: 127.0.0.1
+  callback_port: 8888
+  self_wxid: ""                  # 你的 wxid（可选，防止 DLL 不小心推自发消息）
 
-# 过滤规则
 filter:
-  # 白名单群（只监听这些群），空数组 = 全部群都监听
+  # 注意：aixed DLL 返回的是 roomid（"195940014@chatroom"），不是群显示名
   groups:
-    - "客户 A 项目群"
-    - "项目 X 内部讨论"
-  # 白名单发送人（群里只关心这些人的消息）
+    - "195940014@chatroom"
   senders: []
-  # 关键词命中（任一命中就入库）
   keywords:
     - "报价"
     - "合同"
-    - "付款"
-    - "deadline"
-    - "@bobo"
+    - "@你"
 
-# LLM 评分
 llm:
   base_url: https://api.deepseek.com/v1
   api_key: <你的 key>
   model: deepseek-chat
-  # 评分阈值，>= threshold 的会推送通知
   push_threshold: 4
 
-# 推送通道
 bark:
   enabled: true
   server: https://api.day.app
   key: <你的 Bark key>
 
-# 存储
 storage:
   sqlite_path: data/messages.db
 ```
 
 ## 第六步：跑起来
 
-### 6.1 启动顺序（重要）
+### 6.1 启动顺序
 
-1. 启动 WechatFerry daemon（管理员 PowerShell）
-2. 打开微信 PC 客户端，登录
-3. 启动 consumer：
+1. **确认 version.dll 在 WeChat 目录**（`C:\Program Files\Tencent\Weixin\version.dll`）
+2. **打开微信 PC 客户端**，登录
+3. **启动 consumer**：
    ```powershell
-   cd C:\projects\WeChatFerryTool
+   cd D:\projects\WeChatFerryTool
    .\.venv\Scripts\Activate.ps1
    python -m consumer.main
    ```
 
+consumer 启动时会：
+- 检查 DLL 是否在（探测 `127.0.0.1:30001`）
+- 启 HTTP server 在 8888
+- 调 DLL `/set_callback` 把自己的地址注册进去
+- 进入消息循环
+
 ### 6.2 一键启动脚本
 
-`start.sh`（在 Git Bash 里跑）：
+在 Git Bash 里：
 
 ```bash
-#!/bin/bash
-# 启动顺序：先 daemon，再微信（手动），再 consumer
-
-# 1. 启动 daemon（后台）
-echo "Starting WechatFerry daemon..."
-start /B "C:\tools\WeChatFerry\wcf.exe" || echo "请手动以管理员身份启动 wcf.exe"
-
-sleep 3
-
-# 2. 启动 consumer
-echo "Starting consumer..."
-cd "$(dirname "$0")"
-source .venv/Scripts/activate
-python -m consumer.main
+./start.sh
 ```
+
+会自动启动微信（要求 version.dll 已在位），然后 exec consumer。
 
 ### 6.3 验证
 
 让群里发一条带"报价"关键词的消息，应该：
-- consumer 日志打印 "received msg from group X"
+- consumer 日志打印 "入库 [roomid] sender: ... (reason=keyword:报价)"
 - SQLite 里写入一条记录
 - 调 LLM 评分，假设评分 >=4，Bark 收到推送
 

@@ -1,22 +1,31 @@
-# WechatFerry daemon 连接
-wcf:
-  ws_url: ws://127.0.0.1:8888
+# aixed/WeChat-Hook DLL 连接
+hook:
+  api_base: http://127.0.0.1:30001          # DLL 注入 WeChat 后起的 HTTP 服务
+  callback_host: 127.0.0.1                  # 我们启的回调 server 监听地址
+  callback_port: 8888                       # 回调端口
+  api_timeout_s: 5.0
+  self_wxid: ""                             # 你的微信 wxid（防止 DLL 不小心推自发消息过来；不填 = 不过滤）
+                                            # 例如: "wxid_abc123def456"
 
 # 过滤规则
 filter:
-  # 白名单群（只监听这些群），空数组 = 全部群都监听
+  # 白名单群（用 roomid，不是群显示名——DLL 只返回 roomid）
+  # 例如: "195940014@chatroom" / "50463089950@chatroom"
+  # 空数组 = 全部群都监听
   groups:
-    - "客户 A 项目群"
-    - "项目 X 内部讨论"
-  # 白名单发送人（群里只关心这些人的消息），空数组 = 群里所有发送人
+    - "195940014@chatroom"
+  # 白名单发送人（用 wxid）
+  # 空数组 = 群里所有发送人
   senders: []
-  # 关键词命中（任一命中就入库）
+  # 关键词命中（任一命中就入库），子串匹配
   keywords:
     - "报价"
     - "合同"
     - "付款"
     - "deadline"
-    - "@bobo"
+    - "@你"
+  # 大小写敏感开关，默认 true（不敏感），符合实际聊天场景
+  case_insensitive: true
 
 # LLM 评分
 llm:

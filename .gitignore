@@ -5,5 +5,11 @@ __pycache__/
 *.pyc
 config.yaml
 *.db
+
+# 运行时产物：含真实聊天记录与个人标识，仅保留在本地
+reports/
+STATUS.md
+.backups/
+
 .DS_Store
 Thumbs.db
