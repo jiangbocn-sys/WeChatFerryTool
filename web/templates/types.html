@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>消息类型分布</h2>
+
+<p class="hint">开发期观察用。所有类型目前都入库，后续可在这个页面决定哪些类型要处理。</p>
+
+{% if rows %}
+<table>
+    <thead>
+        <tr>
+            <th>type</th>
+            <th>数量</th>
+            <th>说明</th>
+            <th>最近样本</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+        <tr>
+            <td><code>{{ r.msg_type }}</code></td>
+            <td><strong>{{ r.n }}</strong></td>
+            <td>
+                {% if r.msg_type == 1 %}文本
+                {% elif r.msg_type == 3 %}图片
+                {% elif r.msg_type == 34 %}语音
+                {% elif r.msg_type == 37 %}好友请求
+                {% elif r.msg_type == 42 %}名片
+                {% elif r.msg_type == 43 %}视频
+                {% elif r.msg_type == 47 %}表情
+                {% elif r.msg_type == 48 %}位置
+                {% elif r.msg_type == 49 %}链接/文件/小程序
+                {% elif r.msg_type == 50 %}VoIP
+                {% elif r.msg_type == 51 %}系统(操作事件)
+                {% elif r.msg_type == 10000 %}系统(提示)
+                {% elif r.msg_type == 10002 %}撤回
+                {% else %}其他
+                {% endif %}
+            </td>
+            <td>
+                {% if r.sample %}
+                    <div class="muted" style="font-size:12px">
+                        {{ r.sample_ts }} · {{ r.sample.group_name }} · {{ r.sample.sender }}
+                    </div>
+                    <div style="font-size:12px">{{ r.sample.preview }}</div>
+                {% endif %}
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="empty">数据库里还没有消息</p>
+{% endif %}
+
+{% endblock %}

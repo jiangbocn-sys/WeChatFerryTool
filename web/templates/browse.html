@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px">
+    <h2 style="margin:0">消息浏览</h2>
+    <label style="font-size:13px; color:#7f8c8d; cursor:pointer">
+        <input type="checkbox" id="auto-refresh-toggle"> 🔄 每 30 秒自动刷新
+    </label>
+</div>
+<script src="{{ url_for('static', filename='auto-refresh.js') }}"></script>
+
+<form method="GET" class="filters">
+    <input type="number" name="per_page" value="{{ per_page }}" min="10" max="200" placeholder="每页" style="width:70px">
+    <select name="channel" style="width:100px">
+        <option value="" {% if channel == '' %}selected{% endif %}>全部会话</option>
+        <option value="group" {% if channel == 'group' %}selected{% endif %}>👥 仅群</option>
+        <option value="private" {% if channel == 'private' %}selected{% endif %}>🗨 仅私聊</option>
+    </select>
+    <select name="msg_type" style="width:120px">
+        <option value="" {% if msg_type == '' %}selected{% endif %}>全部类型</option>
+        <option value="1" {% if msg_type == '1' %}selected{% endif %}>1 文本</option>
+        <option value="3" {% if msg_type == '3' %}selected{% endif %}>3 图片</option>
+        <option value="34" {% if msg_type == '34' %}selected{% endif %}>34 语音</option>
+        <option value="43" {% if msg_type == '43' %}selected{% endif %}>43 视频</option>
+        <option value="47" {% if msg_type == '47' %}selected{% endif %}>47 表情</option>
+        <option value="49" {% if msg_type == '49' %}selected{% endif %}>49 链接/文件</option>
+        <option value="51" {% if msg_type == '51' %}selected{% endif %}>51 系统</option>
+        <option value="10000" {% if msg_type == '10000' %}selected{% endif %}>10000 系统</option>
+        <option value="other" {% if msg_type == 'other' %}selected{% endif %}>其他</option>
+    </select>
+    <select name="group" style="max-width:220px" title="群/会话（按最近活跃倒序，前 20）">
+        <option value="">全部群/会话</option>
+        {% for g in group_opts %}
+        <option value="{{ g.k }}" {% if group == g.k %}selected{% endif %} title="{{ g.k }}">
+            {{ g.label }}{% if g.n is not none %} · {{ g.n }}条{% endif %}{% if g.extra %} · 当前{% endif %}
+        </option>
+        {% endfor %}
+    </select>
+    <select name="sender" style="max-width:200px" title="发送人（按最近活跃倒序，前 20）">
+        <option value="">全部发送人</option>
+        {% for s in sender_opts %}
+        <option value="{{ s.k }}" {% if sender == s.k %}selected{% endif %} title="{{ s.k }}">
+            {{ s.label }}{% if s.n is not none %} · {{ s.n }}条{% endif %}{% if s.extra %} · 当前{% endif %}
+        </option>
+        {% endfor %}
+    </select>
+    <input type="text" name="keyword" value="{{ keyword }}" placeholder="关键词" style="width:100px">
+    <label><input type="checkbox" name="important" value="1" {% if only_important %}checked{% endif %}> 只看重点</label>
+    <input type="hidden" name="page" value="1">
+    <button type="submit">查询</button>
+    {% if total_pages %}
+    <span class="muted">共 {{ total }} 条 · 第 {{ page }} / {{ total_pages }} 页</span>
+    {% endif %}
+</form>
+
+{% if rows %}
+<div class="card">
+{% for r in rows %}
+    <div class="message {% if r.priority >= 1 or r.important_match %}imp{% endif %}">
+        <div class="meta">
+            <span class="ts">{{ r.ts }}</span>
+            {% if '@chatroom' in r.group_name %}<span class="tag">👥 群</span>
+            {% else %}<span class="tag private">🗨 私聊</span>{% endif %}
+            {% if r.direction == 'in' %}<span class="tag">📥 收到</span>
+            {% elif r.direction == 'out' %}<span class="tag">📤 发出</span>
+            {% else %}<span class="tag">❓方向未知</span>
+            {% endif %}
+            {% if r.msg_type == 6 %}<span class="tag">📎文件</span>
+            {% elif r.msg_type == 49 %}<span class="tag">🔗链接</span>
+            {% elif r.msg_type == 51 %}<span class="tag">⚙️系统</span>
+            {% elif r.msg_type != 1 %}<span class="tag">type={{ r.msg_type }}</span>
+            {% endif %}
+            {% if r.priority >= 1 %}<span class="tag important">★重要</span>{% endif %}
+            {% if r.pushed %}<span class="tag">📤已推送</span>{% endif %}
+            {% if r.group_important %}<span class="tag important">★群</span>{% endif %}
+            {% if r.sender_important %}<span class="tag important">★人</span>{% endif %}
+        </div>
+        <div>
+            <!-- 点击群/发送人弹出标定弹窗 -->
+            <details class="inline-label">
+                <summary><strong>{{ r.group_label }}</strong></summary>
+                <form method="POST" action="{{ url_for('labels_quick_save') }}" class="quick-label-form">
+                    <input type="hidden" name="kind" value="groups">
+                    <input type="hidden" name="key" value="{{ r.group_name }}">
+                    <input type="hidden" name="redirect" value="{{ request.full_path }}">
+                    <input type="text" name="name" value="{{ labels.groups[r.group_name].name if labels.groups.get(r.group_name) else '' }}" placeholder="显示名（如：易青岚乙巳年弟子群）" autofocus>
+                    <label><input type="checkbox" name="important" {% if labels.groups.get(r.group_name, {}).get('important') %}checked{% endif %}> ★ 重点</label>
+                    <button type="submit">保存</button>
+                </form>
+            </details>
+            ·
+            <details class="inline-label">
+                <summary>{{ r.sender_label }}</summary>
+                <form method="POST" action="{{ url_for('labels_quick_save') }}" class="quick-label-form">
+                    <input type="hidden" name="kind" value="senders">
+                    <input type="hidden" name="key" value="{{ r.sender }}">
+                    <input type="hidden" name="redirect" value="{{ request.full_path }}">
+                    <input type="text" name="name" value="{{ labels.senders[r.sender].name if labels.senders.get(r.sender) else '' }}" placeholder="显示名（如：Mr.Gao）">
+                    <label><input type="checkbox" name="important" {% if labels.senders.get(r.sender, {}).get('important') %}checked{% endif %}> ★ 重点</label>
+                    <button type="submit">保存</button>
+                </form>
+            </details>
+            {% if r.score is not none %}
+                {% if r.score >= 4 %}<span class="tag score-high">score {{ r.score }}</span>
+                {% else %}<span class="tag score-low">score {{ r.score }}</span>
+                {% endif %}
+            {% else %}<span class="muted">未评分</span>{% endif %}
+        </div>
+        <div class="content">
+            {% if r.msg_type == 34 %}
+                <span class="muted">[语音]</span>
+                {% if r.transcript and not r.transcript.startswith('[') %}{{ r.transcript[:300] }}{% if r.transcript|length > 300 %}…{% endif %}
+                {% else %}<span class="muted">（未转写）</span>{% endif %}
+            {% else %}
+                {{ r.preview }}{% if r.preview and r.preview|length >= 200 %}…{% endif %}
+            {% endif %}
+        </div>
+    </div>
+{% endfor %}
+</div>
+
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+        <a href="{{ url_for('browse_page', page=page-1, per_page=per_page, channel=channel, msg_type=msg_type, group=group, sender=sender, keyword=keyword, important='1' if only_important else '') }}" class="button">‹ 上一页</a>
+    {% endif %}
+    <span class="muted">第 {{ page }} / {{ total_pages }} 页</span>
+    {% if page < total_pages %}
+        <a href="{{ url_for('browse_page', page=page+1, per_page=per_page, channel=channel, msg_type=msg_type, group=group, sender=sender, keyword=keyword, important='1' if only_important else '') }}" class="button">下一页 ›</a>
+    {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+    <p class="empty">没有匹配的消息</p>
+{% endif %}
+
+<style>
+.inline-label { display: inline-block; }
+.inline-label summary { cursor: pointer; }
+.inline-label summary::-webkit-details-marker { display: none; }
+.inline-label[open] summary { color: #3498db; }
+.inline-label summary:hover { background: #ecf0f1; padding: 0 4px; border-radius: 3px; }
+.quick-label-form {
+    background: #f8f9fa;
+    padding: 8px;
+    border-radius: 4px;
+    margin: 6px 0;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.quick-label-form input[type=text] { flex: 1; padding: 4px 8px; border: 1px solid #bdc3c7; border-radius: 3px; font-size: 13px; }
+.quick-label-form button { padding: 4px 12px; font-size: 12px; }
+.pagination {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+.pagination .button { text-decoration: none; }
+</style>
+
+{% endblock %}

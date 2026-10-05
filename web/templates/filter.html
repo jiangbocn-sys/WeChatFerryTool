@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>监控规则</h2>
+
+{% set grp = cfg.get('groups') or [] %}
+{% set snd = cfg.get('senders') or [] %}
+{% set kw  = cfg.get('keywords') or [] %}
+
+<div class="warn">
+    <strong>判定逻辑</strong>：消息 <code>group_name</code> 在 <code>groups</code> 列表里 <em>或</em> <code>sender</code> 在 <code>senders</code> 列表里 <em>或</em> 内容命中 <code>keywords</code> 任一关键词 → 入库。任一命中即过。
+</div>
+
+<div class="card" style="background:#eaf4ff">
+<h3 style="margin-top:0">📊 当前生效范围</h3>
+<div class="kv">
+    <div class="k">群 / 会话</div>
+    <div class="v">
+        {% if grp %}
+            <strong>指定 {{ grp|length }} 个</strong>：<code>{{ grp|join('</code> <code>') }}</code>
+        {% else %}
+            <strong style="color:#27ae60">🌐 全部监听</strong>（不限群）
+        {% endif %}
+    </div>
+    <div class="k">发送人</div>
+    <div class="v">
+        {% if snd %}
+            <strong>指定 {{ snd|length }} 个</strong>：<code>{{ snd|join('</code> <code>') }}</code>
+        {% else %}
+            <strong style="color:#27ae60">🌐 全部监听</strong>（不限人）
+        {% endif %}
+    </div>
+    <div class="k">关键词</div>
+    <div class="v">
+        {% if kw %}
+            <strong>指定 {{ kw|length }} 个</strong>：<code>{{ kw|join('</code> <code>') }}</code>
+        {% else %}
+            <strong style="color:#f39c12">⚠️ 全部监听</strong>（不限内容，每条都入库 + 评分）
+        {% endif %}
+    </div>
+</div>
+</div>
+
+<form method="POST" action="{{ url_for('filter_update') }}">
+<div class="card">
+    <h3>监控群 / 会话</h3>
+    <div class="form-row">
+        <label>groups（每行一个 roomid / 私聊 wxid）</label>
+        <textarea name="groups" placeholder="195940014@chatroom&#10;49366798260@chatroom">{{ '\n'.join(cfg.get('groups', [])) }}</textarea>
+        <div class="hint">空 = 不限制群。群用 roomid（"XXX@chatroom"），私聊用对方 wxid。</div>
+    </div>
+</div>
+
+<div class="card">
+    <h3>重点发送人</h3>
+    <div class="form-row">
+        <label>senders（每行一个 wxid）</label>
+        <textarea name="senders" placeholder="wxid_xxx">{{ '\n'.join(cfg.get('senders', [])) }}</textarea>
+        <div class="hint">空 = 不限制人。仅"命中即入库"，不区分群私聊。</div>
+    </div>
+</div>
+
+<div class="card">
+    <h3>关键词</h3>
+    <div class="form-row">
+        <label>keywords（每行一个，子串匹配）</label>
+        <textarea name="keywords" placeholder="报价&#10;合同&#10;付款">{{ '\n'.join(cfg.get('keywords', [])) }}</textarea>
+        <div class="hint">大小写不敏感默认开（推荐）。子串包含即命中。</div>
+    </div>
+    <div class="form-row">
+        <label><input type="checkbox" name="case_insensitive" {% if cfg.get('case_insensitive', True) %}checked{% endif %}> 大小写不敏感</label>
+    </div>
+</div>
+
+<button type="submit">💾 保存</button>
+<p class="hint" style="margin-top:8px">保存后立即生效（consumer 下次处理消息时用新规则）。不需要重启。</p>
+</form>
+
+{% endblock %}

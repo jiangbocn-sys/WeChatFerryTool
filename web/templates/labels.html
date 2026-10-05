@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>标定（显示名 + 重点关注）</h2>
+
+<p class="hint">给 wxid/roomid 起个名字，新消息进来时自动套用；勾选"★重点关注"的消息会自动打 priority=1。</p>
+
+<form method="POST" action="{{ url_for('labels_save') }}">
+
+<div class="card">
+    <h3>群 / 会话</h3>
+    {% if labels.groups %}
+        {% for k, v in labels.groups.items() %}
+        {% set gi = loop.index0 %}
+        <div class="label-row">
+            <div class="wxid">{{ k }} {% if "@chatroom" not in k %}<span class="tag private">私聊</span>{% endif %}</div>
+            <input type="text" name="labels[groups][{{ k }}]_name" value="{{ v.name }}" placeholder="显示名">
+            <label><input type="checkbox" name="labels[groups][{{ k }}]_important" {% if v.important %}checked{% endif %}> ★</label>
+            <div class="muted" style="font-size:11px">{{ v.name or "(未命名)" }}</div>
+        </div>
+        {# —— 重点成员编辑器：勾选后，只有这些人的发言算"重点关注" —— #}
+        {% set focus_list = v.focus_members or [] %}
+        <details style="margin:2px 0 10px 12px">
+            <summary style="cursor:pointer; font-size:12px; color:{{ '#f39c12' if focus_list else '#7f8c8d' }}">
+                重点成员{% if focus_list %}（已选 {{ focus_list|length }} 人）{% else %}（未设置 = 全群算重点）{% endif %}
+            </summary>
+            <div style="background:#f8f9fa; border-radius:4px; padding:8px; margin-top:6px">
+                {% if group_senders.get(k) %}
+                    {% for s in group_senders[k] %}
+                    <label style="display:inline-block; margin:2px 12px 2px 0; font-size:12px">
+                        <input type="checkbox" name="focus[{{ gi }}]" value="{{ s.wxid }}"
+                               {% if s.focus %}checked{% endif %}>
+                        {{ s.name or s.wxid }} <span class="muted">({{ s.count }})</span>
+                    </label>
+                    {% endfor %}
+                {% else %}
+                    <div class="muted" style="font-size:12px">该群暂无历史消息，无法列出成员</div>
+                {% endif %}
+                <div style="margin-top:6px">
+                    <textarea name="focus_extra[{{ gi }}]" rows="2"
+                              placeholder="其他成员 wxid，每行一个" style="width:100%; font-size:12px"></textarea>
+                </div>
+            </div>
+        </details>
+        <input type="hidden" name="focus_key[{{ gi }}]" value="{{ k }}">
+        {% endfor %}
+    {% else %}
+        <p class="empty">还没有标定</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>联系人（发送人 wxid）</h3>
+    {% if labels.senders %}
+        {% for k, v in labels.senders.items() %}
+        <div class="label-row">
+            <div class="wxid">{{ k }}</div>
+            <input type="text" name="labels[senders][{{ k }}]_name" value="{{ v.name }}" placeholder="显示名">
+            <label><input type="checkbox" name="labels[senders][{{ k }}]_important" {% if v.important %}checked{% endif %}> ★</label>
+            <div class="muted" style="font-size:11px">{{ v.name or "(未命名)" }}</div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p class="empty">还没有标定</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>新增标定</h3>
+    <p class="hint">从下面数据库见过的 ID 里选（或自己填），起名 + 选重点。</p>
+    <table>
+        <thead><tr><th>类型</th><th>wxid / roomid</th><th>显示名</th><th>★</th></tr></thead>
+        <tbody>
+        {% set ungrouped = [] %}
+        {% for g in db_groups %}
+            {% if g not in labels.groups %}
+            <tr>
+                <td>群</td>
+                <td><code>{{ g }}</code></td>
+                <td><input type="text" name="labels_new[groups]_name_{{ loop.index0 }}" placeholder="显示名"></td>
+                <td><input type="checkbox" name="labels_new[groups]_important_{{ loop.index0 }}"></td>
+            </tr>
+            <input type="hidden" name="labels_new[groups]_key_{{ loop.index0 }}" value="{{ g }}">
+            {% endif %}
+        {% endfor %}
+        {% for s in db_senders %}
+            {% if s not in labels.senders %}
+            <tr>
+                <td>人</td>
+                <td><code>{{ s }}</code></td>
+                <td><input type="text" name="labels_new[senders]_name_{{ loop.index0 }}" placeholder="显示名"></td>
+                <td><input type="checkbox" name="labels_new[senders]_important_{{ loop.index0 }}"></td>
+            </tr>
+            <input type="hidden" name="labels_new[senders]_key_{{ loop.index0 }}" value="{{ s }}">
+            {% endif %}
+        {% endfor %}
+        </tbody>
+    </table>
+    {% if not db_groups|reject("in", labels.groups)|list and not db_senders|reject("in", labels.senders)|list %}
+        <p class="empty">数据库里的 ID 都已标定过了 🎉</p>
+    {% endif %}
+</div>
+
+<button type="submit">💾 保存</button>
+</form>
+
+{% endblock %}

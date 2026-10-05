@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px">
+    <h2 style="margin:0">仪表盘</h2>
+    <label style="font-size:13px; color:#7f8c8d; cursor:pointer">
+        <input type="checkbox" id="auto-refresh-toggle"> 🔄 每 30 秒自动刷新
+    </label>
+</div>
+<script>
+(function () {
+    var KEY = 'wft_auto_refresh';
+    var cb = document.getElementById('auto-refresh-toggle');
+    if (!cb) return;
+    cb.checked = localStorage.getItem(KEY) === '1';
+    if (cb.checked) start();
+    cb.addEventListener('change', function () {
+        if (cb.checked) {
+            localStorage.setItem(KEY, '1');
+            start();
+        } else {
+            localStorage.setItem(KEY, '0');
+            stop();
+        }
+    });
+    function start() { window._autoTimer = setInterval(function () { location.reload(); }, 30000); }
+    function stop()  { if (window._autoTimer) clearInterval(window._autoTimer); }
+})();
+</script>
+
+<div class="stat-grid">
+    <div class="stat">
+        <div class="label">消息总数</div>
+        <div class="value">{{ stats.total_messages }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">重点关注消息</div>
+        <div class="value" style="color:#f39c12">{{ stats.important_messages }}</div>
+        <div class="sub">{{ n_important_groups }} 群 + {{ n_important_senders }} 人</div>
+    </div>
+    <div class="stat">
+        <div class="label">群会话</div>
+        <div class="value">{{ stats.groups }}</div>
+        <div class="sub">👥 群</div>
+    </div>
+    <div class="stat">
+        <div class="label">私聊</div>
+        <div class="value">{{ stats.private_chats }}</div>
+        <div class="sub">🗨 私聊</div>
+    </div>
+    <div class="stat">
+        <div class="label">独立发送人</div>
+        <div class="value">{{ stats.senders }}</div>
+    </div>
+</div>
+
+<div class="card">
+    <h3>最新消息</h3>
+    {% if recent %}
+    <table>
+        <thead>
+            <tr><th>时间</th><th>群/会话</th><th>发送人</th><th>内容</th><th>评分</th></tr>
+        </thead>
+        <tbody>
+        {% for r in recent %}
+            <tr>
+                <td class="muted" style="white-space:nowrap">{{ r.ts }}</td>
+                <td>
+                    {{ r.group_label }}
+                    {% if r.priority >= 1 %}<span class="tag important">★</span>{% endif %}
+                </td>
+                <td>{{ r.sender_label }}</td>
+                <td>{{ r.preview }}{% if r.preview|length >= 80 %}…{% endif %}</td>
+                <td>
+                    {% if r.score is none %}<span class="muted">—</span>
+                    {% elif r.score >= 4 %}<span class="tag score-high">{{ r.score }}</span>
+                    {% else %}<span class="tag score-low">{{ r.score }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty">还没有消息。先确认 consumer 在跑。</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>当前生效配置</h3>
+    <div class="kv">
+        <div class="k">daemon URL</div><div class="v">{{ cfg.hook.api_base if cfg.hook else '—' }}</div>
+        <div class="k">callback</div><div class="v">http://{{ cfg.hook.callback_host if cfg.hook else '—' }}:{{ cfg.hook.callback_port if cfg.hook else '—' }}</div>
+        <div class="k">self_wxid</div><div class="v">{{ cfg.hook.self_wxid or '(未配置)' }}</div>
+        <div class="k">LLM</div><div class="v">{{ cfg.llm.model if cfg.llm else '—' }} @ {{ cfg.llm.base_url if cfg.llm else '—' }}</div>
+        <div class="k">push_threshold</div><div class="v">{{ cfg.llm.push_threshold if cfg.llm else '—' }}</div>
+        <div class="k">filter.groups</div><div class="v">{% if cfg.filter and cfg.filter.groups %}{{ cfg.filter.groups|length }} 个{% else %}<span style="color:#27ae60">🌐 全部</span>{% endif %}</div>
+        <div class="k">filter.senders</div><div class="v">{% if cfg.filter and cfg.filter.senders %}{{ cfg.filter.senders|length }} 个{% else %}<span style="color:#27ae60">🌐 全部</span>{% endif %}</div>
+        <div class="k">filter.keywords</div><div class="v">{% if cfg.filter and cfg.filter.keywords %}{{ cfg.filter.keywords|length }} 个{% else %}<span style="color:#f39c12">⚠️ 全部</span>{% endif %}</div>
+    </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>自动回复</h2>
+
+<div class="warn">
+    <strong>⚠️ 封号风险</strong>：自动回复触发微信反作弊检测。建议先勾 <code>test_only</code> 观察行为，确认无误后再去掉。
+</div>
+
+<form method="POST" action="{{ url_for('replies_update') }}">
+
+<div class="card">
+    <h3>总开关</h3>
+    <label><input type="checkbox" name="enabled" {% if replies.enabled %}checked{% endif %}> 启用自动回复（⚠️ 风险高）</label>
+</div>
+
+<div class="card">
+    <h3>回复模板</h3>
+    {% if replies.templates %}
+        {% for t in replies.templates %}
+        <fieldset style="border:1px solid #ddd; padding:12px; margin-bottom:12px; border-radius:6px">
+            <legend style="padding:0 8px; font-weight:600">模板 #{{ loop.index }} {% if t.test_only %}<span style="color:#7f8c8d; font-weight:normal">🧪 测试模式</span>{% else %}<span style="color:#e74c3c; font-weight:normal">⚠️ 真实发送</span>{% endif %}</legend>
+            <div class="form-row"><label>name</label><input type="text" name="templates[{{ loop.index0 }}][name]" value="{{ t.name or '' }}"></div>
+            <div class="form-row"><label>trigger（关键词）</label><input type="text" name="templates[{{ loop.index0 }}][trigger]" value="{{ t.trigger or '' }}"></div>
+            <div class="form-row"><label>match_type</label>
+                <select name="templates[{{ loop.index0 }}][match_type]">
+                    <option value="substring" {% if t.match_type == 'substring' %}selected{% endif %}>substring（子串）</option>
+                    <option value="exact" {% if t.match_type == 'exact' %}selected{% endif %}>exact（精确匹配）</option>
+                    <option value="regex" {% if t.match_type == 'regex' %}selected{% endif %}>regex（正则）</option>
+                </select>
+            </div>
+            <div class="form-row"><label>response（回复内容）</label><textarea name="templates[{{ loop.index0 }}][response]" rows="3" placeholder="固定回复文本；勾选 use_llm 后变成 LLM 人设/指令">{{ t.response or '' }}</textarea></div>
+            <div class="form-row"><label><input type="checkbox" name="templates[{{ loop.index0 }}][use_llm]" {% if t.use_llm %}checked{% endif %}> 🤖 use_llm（用 LLM 根据消息动态生成回复；response 字段变成"人设/指令"）</label></div>
+            <div class="form-row"><label>scope.groups（限定群，每行一个）</label>
+                <textarea name="templates[{{ loop.index0 }}][scope_groups]" rows="2">{{ (t.scope.groups | join('\n')) if t.scope and t.scope.groups else '' }}</textarea>
+            </div>
+            <div class="form-row"><label>scope.senders（限定人，每行一个 wxid）</label>
+                <textarea name="templates[{{ loop.index0 }}][scope_senders]" rows="2">{{ (t.scope.senders | join('\n')) if t.scope and t.scope.senders else '' }}</textarea>
+            </div>
+            <div class="form-row"><label><input type="checkbox" name="templates[{{ loop.index0 }}][test_only]" {% if t.test_only %}checked{% endif %}> 🧪 test_only（只记录不发送；取消勾选 = 真实发送 ⚠️）</label></div>
+            <div class="form-row" style="border-top:1px dashed #e74c3c; padding-top:10px; margin-top:10px">
+                <label style="color:#e74c3c"><input type="checkbox" name="templates[{{ loop.index0 }}][_delete]"> 🗑 删除这条模板（保存时生效）</label>
+            </div>
+        </fieldset>
+        {% endfor %}
+    {% endif %}
+    <fieldset style="border:1px dashed #aaa; padding:12px; border-radius:6px">
+        <legend style="padding:0 8px; color:#888">新增模板（保留空白）</legend>
+        <div class="form-row"><label>name</label><input type="text" name="templates[{{ replies.templates|length }}][name]" placeholder="可选，留空自动命名"></div>
+        <div class="form-row"><label>trigger</label><input type="text" name="templates[{{ replies.templates|length }}][trigger]" placeholder="必填，如 @bobo"></div>
+        <div class="form-row"><label>match_type</label>
+            <select name="templates[{{ replies.templates|length }}][match_type]">
+                <option value="substring" selected>substring</option>
+                <option value="exact">exact</option>
+                <option value="regex">regex</option>
+            </select>
+        </div>
+        <div class="form-row"><label>response</label><textarea name="templates[{{ replies.templates|length }}][response]" rows="3" placeholder="回复内容；勾选 use_llm 后变成 LLM 人设/指令"></textarea></div>
+        <div class="form-row"><label>scope.groups（每行一个）</label><textarea name="templates[{{ replies.templates|length }}][scope_groups]" rows="2"></textarea></div>
+        <div class="form-row"><label>scope.senders（每行一个 wxid）</label><textarea name="templates[{{ replies.templates|length }}][scope_senders]" rows="2"></textarea></div>
+        <div class="form-row"><label><input type="checkbox" name="templates[{{ replies.templates|length }}][use_llm]"> 🤖 use_llm（LLM 动态生成回复）</label></div>
+        <div class="form-row"><label><input type="checkbox" name="templates[{{ replies.templates|length }}][test_only]" checked> 🧪 test_only（只记录不发送；默认勾选）</label></div>
+    </fieldset>
+</div>
+
+<div class="card">
+    <h3>限速</h3>
+    {% set rl = replies.rate_limit or {} %}
+    <div class="form-row">
+        <label>每群两次回复最小间隔（秒）</label>
+        <input type="number" name="rl_per_group_cooldown_s" value="{{ rl.per_group_cooldown_s if rl.per_group_cooldown_s is defined else 600 }}" min="60">
+        <div class="hint">建议 ≥ 600（10 分钟）</div>
+    </div>
+    <div class="form-row">
+        <label>全局每天最多回复条数</label>
+        <input type="number" name="rl_global_daily_limit" value="{{ rl.global_daily_limit if rl.global_daily_limit is defined else 30 }}" min="1">
+    </div>
+    <div class="form-row">
+        <label>回复前随机延迟（秒）：min - max</label>
+        <input type="number" name="rl_min_delay_s" value="{{ rl.min_delay_s if rl.min_delay_s is defined else 60 }}" min="0" style="width:80px"> -
+        <input type="number" name="rl_max_delay_s" value="{{ rl.max_delay_s if rl.max_delay_s is defined else 300 }}" min="1" style="width:80px">
+        <div class="hint">建议 60-300 秒，避免被识别为机器人</div>
+    </div>
+</div>
+
+<button type="submit">💾 保存</button>
+<p class="hint" style="margin-top:8px">consumer 启动时加载一次；修改后需重启 consumer 生效（要热加载可以下一版做）。</p>
+</form>
+
+{% endblock %}
