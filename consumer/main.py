@@ -1,29 +1,45 @@
-"""主入口。
+"""主入口（HTTP server 版，适配 aixed/WeChat-Hook）。
 
 启动顺序：
-1. 读 config.yaml
-2. 连接 WechatFerry daemon (WebSocket)
-3. 订阅消息 → 过滤 → 入库 → LLM 评分 → 高分推送
+1. 读 + 校验 config.yaml
+2. 启 HTTP server 在 callback_port（默认 8888），准备接收 DLL 推送
+3. 调 DLL /set_callback 把本机地址告诉 DLL
+4. DLL 收到消息 → POST 到我们这里 → filter → store → score → push
 
-协议说明（基于 WechatFerry 3.x）：
-- 启动时 client.send("callback", json.dumps({"type": "msg"})) 订阅消息
-- daemon 主动推送 {"type":"msg", "data": { ... }}
-- 文本消息字段：id / room (群名) / sender / senderId / content / type / ts
+协议说明（基于 aixed/WeChat-Hook DLL 实际推送的 payload）：
+- event_type: 1001 表示新消息
+- type: 1 = 文本，49 = 链接/卡片，51 = 系统消息，其它见 WeChatFerry 协议
+- 群消息：wxid == roomid == "@chatroom" 后缀；sender 是群成员 wxid
+- 私聊：wxid 是对方 wxid，roomid 为空，sender 是对方 wxid
 """
 import json
 import logging
+import shutil
 import signal
+import sqlite3
 import sys
+import threading
 import time
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import websocket  # websocket-client
 import yaml
 
+from consumer.asr import ASRClient
 from consumer.filter import Filter, FilterConfig
+from consumer.hook_client import HookClient, HookConfig, HookError
 from consumer.notifier import BarkConfig, Notifier
+from consumer.replier import Replier
 from consumer.scorer import Scorer, ScorerConfig
+from consumer.sent_tracker import SentTracker
 from consumer.store import Store
+from consumer.voice import capture_voice, decode_to_wav, find_wechat_files_dir
+from consumer.voice_tap import VoiceTap, conv_hash
+
+LABELS_PATH = Path(__file__).resolve().parent.parent / "data" / "labels.json"
+REPLY_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "reply_state.json"
+SENT_LOG_PATH = Path(__file__).resolve().parent.parent / "data" / "sent_log.json"
 
 
 # ------- logging --------
@@ -41,17 +57,63 @@ logging.basicConfig(
 log = logging.getLogger("consumer.main")
 
 
-# ------- 工具函数 --------
+# ------- 配置校验 --------
+class ConfigError(Exception):
+    pass
+
+
+def _need(d: dict, keys: list[str], where: str) -> None:
+    for k in keys:
+        if k not in d or d[k] in (None, ""):
+            raise ConfigError(f"配置缺失: {where}.{k}")
+
+
 def load_config(path: str = "config.yaml") -> dict:
     p = Path(__file__).resolve().parent.parent / path
+    if not p.exists():
+        raise ConfigError(f"找不到配置文件: {p}（请把 config.example.yaml 复制为 config.yaml 再填值）")
     with open(p, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    validate_config(cfg)
+    return cfg
+
+
+def validate_config(cfg: dict) -> None:
+    """启动期一次性校验。错误直接抛 ConfigError，main() 捕获并退出。"""
+    _need(cfg, ["hook", "filter", "llm", "storage"], "<root>")
+    _need(cfg["hook"], ["api_base", "callback_host", "callback_port"], "hook")
+    _need(cfg["llm"], ["base_url", "api_key", "model"], "llm")
+    _need(cfg["storage"], ["sqlite_path"], "storage")
+
+    bark = cfg.get("bark", {}) or {}
+    if bark.get("enabled"):
+        _need(bark, ["server", "key"], "bark")
+
+    f = cfg["filter"]
+    for k in ("groups", "senders", "keywords"):
+        if k in f and not isinstance(f[k], list):
+            raise ConfigError(f"filter.{k} 必须是列表")
+    for k in ("groups", "senders", "keywords"):
+        f.setdefault(k, [])
+    f.setdefault("case_insensitive", True)
+
+    if cfg["llm"]["api_key"] in ("REPLACE_ME", ""):
+        log.warning("llm.api_key 未配置，消息会入库但不会 LLM 评分")
+
+    if bark.get("enabled") and bark.get("key") in ("REPLACE_ME", ""):
+        log.warning("bark.key 未配置，达到阈值也不会推送")
+
+    hook = cfg["hook"]
+    if not isinstance(hook.get("callback_port"), int):
+        raise ConfigError("hook.callback_port 必须是整数")
+    hook.setdefault("self_wxid", "")
 
 
 # ------- 主循环 --------
 class Consumer:
     def __init__(self, cfg: dict):
         self.cfg = cfg
+        self._stop = False  # 必须最早初始化（后台线程会引用）
         self.store = Store(cfg["storage"]["sqlite_path"])
         self.filter = Filter(FilterConfig.from_yaml(cfg["filter"]))
         self.scorer = Scorer(ScorerConfig(
@@ -59,35 +121,433 @@ class Consumer:
             api_key=cfg["llm"]["api_key"],
             model=cfg["llm"]["model"],
         ))
-        self.notifier = Notifier(BarkConfig(
-            server=cfg["bark"]["server"],
-            key=cfg["bark"]["key"],
-        ) if cfg.get("bark", {}).get("enabled") else None)
+        bark_cfg = cfg.get("bark") or {}
+        self.notifier = Notifier(
+            BarkConfig(server=bark_cfg["server"], key=bark_cfg["key"])
+            if bark_cfg.get("enabled") else None
+        )
         self.push_threshold = int(cfg["llm"].get("push_threshold", 4))
-        self._stop = False
+
+        hook_cfg = cfg["hook"]
+        self.hook = HookClient(HookConfig(
+            api_base=hook_cfg["api_base"],
+            timeout_s=float(hook_cfg.get("api_timeout_s", 5.0)),
+        ))
+        self.callback_host = hook_cfg["callback_host"]
+        self.callback_port = int(hook_cfg["callback_port"])
+        self.self_wxid = (hook_cfg.get("self_wxid") or "").strip()
+
+        # 标定文件（重要的群/联系人），用于给消息打 priority 标签
+        self.labels = self._load_labels()
+        n_g_imp = sum(1 for v in self.labels.get("groups", {}).values() if v.get("important"))
+        n_s_imp = sum(1 for v in self.labels.get("senders", {}).values() if v.get("important"))
+        log.info(
+            "已加载标定: %d 群 / %d 联系人；重点关注 %d 群 / %d 人",
+            len(self.labels.get("groups", {})), len(self.labels.get("senders", {})),
+            n_g_imp, n_s_imp,
+        )
+
+        # 跟踪我们发出去的消息（用于标记 direction=out）
+        self.sent_tracker = SentTracker(SENT_LOG_PATH)
+
+        # 语音捕获（收到语音时立刻从微信 VoiceTemp 抓临时文件）
+        voice_cfg = cfg.get("voice") or {}
+        self.voice_enabled = bool(voice_cfg.get("enabled", True))
+        self.voice_dir = Path(__file__).resolve().parent.parent / (voice_cfg.get("dir") or "data/voices")
+        self.wechat_dir = None
+        self.voice_tap: VoiceTap | None = None
+        if self.voice_enabled:
+            self.wechat_dir = find_wechat_files_dir(self.self_wxid)
+            if self.wechat_dir:
+                log.info("语音捕获已启用，微信数据目录: %s", self.wechat_dir)
+                # 事件驱动全局监听（毫秒级捕获，覆盖收/发两个方向）
+                self.voice_tap = VoiceTap(self.wechat_dir, self.voice_dir / "raw")
+                self.voice_tap.start()
+            else:
+                log.warning("语音捕获已启用但找不到微信数据目录（xwechat_files），功能不可用")
+
+        # 语音转写（Mac mini whisper 服务）
+        asr_cfg = cfg.get("asr") or {}
+        self.asr = ASRClient(
+            url=str(asr_cfg.get("url") or ""),
+            timeout_s=float(asr_cfg.get("timeout_s", 60)),
+            enabled=bool(asr_cfg.get("enabled", True)),
+        )
+        if self.asr.ready:
+            log.info("语音转写已启用: %s", self.asr.url)
+        else:
+            log.info("语音转写未配置（asr.url 为空）——语音会存档为 [待转写]，之后可批量补转")
+
+        # 孤儿语音处理（自己发出的语音没有消息事件 → 定时扫描转写归档）
+        if self.voice_tap is not None and self.asr.ready:
+            threading.Thread(target=self._orphan_sweeper_loop, name="voice-orphan", daemon=True).start()
+            log.info("孤儿语音处理已启用（自己发出的语音也会转写归档）")
+
+        # 每日重点发言归档
+        digest_cfg = cfg.get("digest") or {}
+        self.digest_enabled = bool(digest_cfg.get("enabled", True))
+        self.digest_time = str(digest_cfg.get("time") or "23:30")
+        self.digest_out_dir = Path(__file__).resolve().parent.parent / (digest_cfg.get("dir") or "reports")
+        if self.digest_enabled:
+            threading.Thread(target=self._digest_loop, name="digest", daemon=True).start()
+            log.info("每日归档已启用：每天 %s 生成（目录 %s）", self.digest_time, self.digest_out_dir)
+
+        # 自动回复模块
+        llm_cfg = cfg.get("llm") or {}
+        self.replier = Replier.from_yaml(
+            cfg.get("replies") or {},
+            self.hook,
+            REPLY_STATE_PATH,
+            llm_base_url=str(llm_cfg.get("base_url") or ""),
+            llm_api_key=str(llm_cfg.get("api_key") or ""),
+            llm_model=str(llm_cfg.get("model") or ""),
+            labels_path=LABELS_PATH,
+            sent_tracker=self.sent_tracker,
+            history_fn=lambda g, n: self.store.recent(limit=n, group=g),
+        )
+        if self.replier.cfg.enabled:
+            n_test = sum(1 for t in self.replier.cfg.templates if t.test_only)
+            n_real = len(self.replier.cfg.templates) - n_test
+            log.warning(
+                "⚠️ 自动回复已启用: %d 模板（%d 测试模式 / %d 真实发送）— 谨慎使用，封号风险高",
+                len(self.replier.cfg.templates), n_test, n_real,
+            )
+        else:
+            log.info("自动回复：禁用（配置 replies.enabled: true 开启）")
+
+        self._server: ThreadingHTTPServer | None = None
+        self._server_thread: threading.Thread | None = None
+
+    def _load_labels(self) -> dict:
+        """读取 data/labels.json；文件不存在或解析失败返回空标定。"""
+        if not LABELS_PATH.exists():
+            return {"groups": {}, "senders": {}}
+        try:
+            with LABELS_PATH.open(encoding="utf-8") as f:
+                data = json.load(f)
+            # 防御性：补全结构
+            data.setdefault("groups", {})
+            data.setdefault("senders", {})
+            return data
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("读取 labels.json 失败: %s（按无标定处理）", e)
+            return {"groups": {}, "senders": {}}
+
+    def _digest_loop(self) -> None:
+        """后台线程：每天到点生成重点发言归档（状态持久化，防重启重复生成）。"""
+        state_path = Path(__file__).resolve().parent.parent / "data" / "digest_state.json"
+        while not self._stop:
+            try:
+                now = datetime.now()
+                today = now.strftime("%Y-%m-%d")
+                hhmm = now.strftime("%H:%M")
+                last_date = ""
+                if state_path.exists():
+                    try:
+                        last_date = json.loads(state_path.read_text(encoding="utf-8")).get("last_date", "")
+                    except Exception:  # noqa: BLE001
+                        pass
+                if hhmm >= self.digest_time and last_date != today:
+                    from consumer.digest import generate_digest
+                    p = generate_digest(today, out_dir=self.digest_out_dir)
+                    state_path.write_text(
+                        json.dumps({"last_date": today, "last_file": str(p)}, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    log.info("每日归档已生成: %s", p)
+            except Exception:  # noqa: BLE001
+                log.exception("每日归档任务异常")
+            # 每 60 秒检查一次
+            for _ in range(60):
+                if self._stop:
+                    return
+                time.sleep(1)
+
+    def _orphan_sweeper_loop(self) -> None:
+        """定时扫描未被消息事件认领的语音（多数是自己发出的），转写并归档。"""
+        while not self._stop:
+            try:
+                self._sweep_orphans()
+            except Exception:  # noqa: BLE001
+                log.exception("孤儿语音处理异常")
+            for _ in range(60):
+                if self._stop:
+                    return
+                time.sleep(1)
+
+    def _reverse_conv_map(self) -> dict[str, str]:
+        """md5(会话) -> 会话 id（标定 + 数据库已知 id + 手工映射）。"""
+        ids: set[str] = set()
+        ids |= set((self.labels.get("groups") or {}).keys())
+        ids |= set((self.labels.get("senders") or {}).keys())
+        try:
+            conn = sqlite3.connect(self.cfg["storage"]["sqlite_path"])
+            ids |= {r[0] for r in conn.execute("SELECT DISTINCT group_name FROM messages")}
+            ids |= {r[0] for r in conn.execute("SELECT DISTINCT sender FROM messages")}
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        m = {conv_hash(i): i for i in ids if i}
+        # 手工映射（config: voice.conv_overrides: {hash: 名称}）
+        overrides = (self.cfg.get("voice") or {}).get("conv_overrides") or {}
+        for h, name in overrides.items():
+            m[str(h)] = str(name)
+        return m
+
+    def _sweep_orphans(self) -> None:
+        """把孤儿语音解码+转写，落库为合成消息行（direction=out）。"""
+        if self.voice_tap is None:
+            return
+        files = self.voice_tap.unclaimed_files(older_than_s=90)
+        if not files:
+            return
+        rev = self._reverse_conv_map()
+        for f in files:
+            try:
+                h, ms = f.stem.rsplit("_", 1)
+                ts = int(ms) // 1000
+            except ValueError:
+                h, ts = f.stem, int(time.time())
+            conv_id = rev.get(h)
+            try:
+                size = f.stat().st_size
+            except OSError:
+                size = 0
+            wav = f.with_suffix(".wav")
+            text = None
+            if decode_to_wav(f, wav):
+                text = self.asr.transcribe(wav)
+            fake_id = f"vt-{f.stem}"
+            inserted = self.store.insert_message(
+                msg_id=fake_id,
+                group_name=conv_id or f"(未知会话:{h[:8]})",
+                sender=self.self_wxid or "(self)",
+                sender_id="",
+                content="[语音]",
+                msg_type=34,
+                received_at=ts,
+                priority=0,
+                direction="out",
+            )
+            if inserted is not None and text:
+                self.store.update_transcript(fake_id, text)
+            self.voice_tap.claim(f)
+            log.info("孤儿语音归档: 会话=%s 文件=%d bytes 文字=%s",
+                     conv_id or h[:8], size, (text or "(未转写)")[:60])
+
+    def _capture_voice_bg(self, conv_id: str, msg_id: str) -> None:
+        """后台线程：抓取语音文件 → silk 解码 → ASR 转写 → 落库。
+
+        优先用 VoiceTap 事件驱动捕获（毫秒级、覆盖收发双向）；
+        万一不可用，回退到老的 VoiceTemp 轮询。
+        """
+        try:
+            path = None
+            raw_path = None
+            if self.voice_tap is not None:
+                h = conv_hash(conv_id)
+                path = self.voice_tap.wait_for(h, since=time.time() - 120, timeout_s=20)
+            if path is None:
+                path = capture_voice(self.wechat_dir, conv_id, msg_id, self.voice_dir)
+            if not path:
+                self.store.update_transcript(msg_id, "[未捕获到语音文件]")
+                return
+            # 统一复制为 <msg_id>.bin（保持补转脚本的命名约定）
+            if path.parent.name == "raw":
+                raw_path = path
+                dest_bin = self.voice_dir / f"{msg_id}{path.suffix or '.bin'}"
+                shutil.copy(path, dest_bin)
+                path = dest_bin
+            # 认领（孤儿处理器不再重复处理）
+            if raw_path is not None and self.voice_tap is not None:
+                self.voice_tap.claim(raw_path)
+            wav = path.with_suffix(".wav")
+            if not decode_to_wav(path, wav):
+                self.store.update_transcript(msg_id, "[解码失败]")
+                return
+            text = self.asr.transcribe(wav)
+            if text:
+                self.store.update_transcript(msg_id, text)
+                log.info("语音转写成功 msg=%s: %s", msg_id, text[:60])
+            else:
+                self.store.update_transcript(msg_id, "[待转写]")
+        except Exception:  # noqa: BLE001
+            log.exception("语音捕获线程异常: conv=%s msg=%s", conv_id, msg_id)
+
+    def _compute_priority(self, group_name: str, sender: str) -> tuple[int, str]:
+        """返回 (priority, reason)。priority=1 表示命中重点关注。
+
+        规则（互斥，按顺序）：
+        1. 群配置了 focus_members（重点成员）→ 只有这些成员在该群的发言算重点
+        2. 群标记 important 且无 focus_members → 群内全部发言算重点
+        3. 发送人全局标记 important → 其任何群的发言都算重点（叠加）
+        """
+        reasons: list[str] = []
+        g_entry = self.labels.get("groups", {}).get(group_name) or {}
+        focus = [m for m in (g_entry.get("focus_members") or []) if m]
+        if focus:
+            if sender in focus:
+                reasons.append(f"重点成员@{g_entry.get('name', group_name)}")
+        elif g_entry.get("important"):
+            reasons.append(f"群={g_entry.get('name', group_name)}")
+
+        s_entry = self.labels.get("senders", {}).get(sender) or {}
+        if s_entry.get("important"):
+            reasons.append(f"人={s_entry.get('name', sender)}")
+
+        if reasons:
+            return 1, "+".join(reasons)
+        return 0, ""
 
     def stop(self, *_) -> None:
         log.info("收到停止信号，退出中...")
         self._stop = True
+        if self._server is not None:
+            try:
+                self._server.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self.replier.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self.voice_tap is not None:
+                self.voice_tap.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- HTTP server ----
+
+    def _make_handler(self):
+        """生成一个知道 self（consumer 实例）的 RequestHandler 子类。"""
+        outer = self
+
+        class CallbackHandler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):  # noqa: A003
+                pass  # 关掉默认 access log，我们自己打
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                raw = self.rfile.read(length) if length > 0 else b""
+                try:
+                    payload = json.loads(raw.decode("utf-8")) if raw else {}
+                except Exception as e:  # noqa: BLE001
+                    log.warning("非 JSON 回调: %s (err=%s)", raw[:200], e)
+                    self._reply(400)
+                    return
+                try:
+                    outer.handle_message(payload)
+                except Exception:  # noqa: BLE001
+                    log.exception("处理回调异常: %r", payload)
+                self._reply(200)
+
+            def do_GET(self):  # noqa: N802
+                # 健康检查
+                self._reply(200, b"consumer ok\n")
+
+            def _reply(self, code: int, body: bytes = b'{"ok":true}\n') -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        return CallbackHandler
+
+    def start_server(self) -> None:
+        handler = self._make_handler()
+        self._server = ThreadingHTTPServer(
+            (self.callback_host, self.callback_port), handler
+        )
+        self._server_thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="consumer-http",
+            daemon=True,
+        )
+        self._server_thread.start()
+        log.info(
+            "回调 server 已启动: http://%s:%d  (日志: %s)",
+            self.callback_host, self.callback_port, LOG_DIR / "consumer.log",
+        )
+
+    def register_callback(self) -> None:
+        """告诉 DLL 把消息推到哪里。失败抛出 HookError，main() 退出。"""
+        url = f"http://{self.callback_host}:{self.callback_port}/hook/callback"
+        result = self.hook.set_callback(url)
+        log.info("已注册回调: %s -> %s", url, result)
+
+    # ---- 业务 ----
 
     def handle_message(self, msg: dict) -> None:
-        """处理一条 daemon 推送的消息事件。"""
+        """处理一条 DLL 推送的消息事件。"""
         try:
-            data = msg.get("data") or {}
-            msg_type = data.get("type", 1)
-            # 只处理文本（type=1）；图片/文件/系统消息忽略
-            if msg_type != 1:
+            # DLL 用 event_type 区分事件类型，1001 是新消息
+            # 其他类型（系统消息、撤回等）暂时不处理
+            if msg.get("event_type") not in (1001, None):
                 return
 
-            group_name = data.get("room") or "(私聊)"
-            sender = data.get("sender") or ""
-            sender_id = data.get("senderId") or ""
-            content = (data.get("content") or "").strip()
-            msg_id = str(data.get("id") or "")
-            ts = int(data.get("ts") or time.time())
+            msg_type = int(msg.get("type") or 1)
+            # 1=文本, 6=文件, 49=链接/卡片, 51=系统消息等
+            # 文本入库 + LLM 评分；非文本只入库元信息（不调 LLM）
+            is_text = (msg_type == 1)
 
-            if not content or not msg_id:
+            sender = msg.get("sender") or ""
+            wxid = msg.get("wxid") or ""
+            roomid = msg.get("roomid") or ""
+
+            content = (msg.get("content") or "").strip()
+            msg_id = str(msg.get("msgid") or "")
+            ts = int(msg.get("timestamp") or 0) or None
+
+            if not msg_id:
                 return
+            # 非文本消息：用占位符填充 content，方便管理平台看到"有这条消息"
+            if not is_text and not content:
+                content = f"[非文本 type={msg_type}]"
+            if not content:
+                return
+
+            # 群 vs 私聊
+            if roomid:
+                # 群消息：DLL 不返回群显示名，先用 roomid 占位
+                group_name = roomid
+            else:
+                # 私聊：用对方 wxid 当 group_name（兼容老 filter）
+                group_name = wxid or "(私聊)"
+
+            # 语音消息：立刻启动捕获线程（微信 VoiceTemp 临时文件会被清理，要抢时间）
+            if msg_type == 34 and self.voice_enabled and self.wechat_dir:
+                threading.Thread(
+                    target=self._capture_voice_bg,
+                    args=(group_name, msg_id),
+                    daemon=True,
+                    name="voice-capture",
+                ).start()
+
+            # 计算 is_self（是不是自己发的）
+            # DLL 字段语义（最终确认的"作者模型"）：
+            #   sender 字段 = 消息作者的 wxid（群、私聊都一样）
+            #   - 自己发的消息：sender == self_wxid（ruibo_jiang = 姜波/你）
+            #   - Mr.Gao 发的消息：sender == wxid_8cjwgonnvyq822
+            # 辅以 sent_tracker（记录 consumer 自动回复发出去的消息）
+            is_self = bool(self.self_wxid) and sender == self.self_wxid
+            if not is_self and self.sent_tracker.is_self_sent(group_name, content, ts=ts or 0):
+                is_self = True
+            direction = "out" if is_self else "in"
+
+            # 私聊自发消息的归属修正：
+            # DLL 对私聊只报"消息作者"，不报"发给了谁"（group_name 也会填成自己）。
+            # 若这条是我们（replier）发出去的，sent_tracker 里有目标会话记录 → 修正归属，
+            # 这样 store.recent(group=对方wxid) 就能拼出双向私聊历史。
+            if is_self and not roomid:
+                target = self.sent_tracker.match_any(content, ts=ts or 0)
+                if target:
+                    log.debug("私聊归属修正: %s -> %s", group_name, target)
+                    group_name = target
+                else:
+                    # 临时诊断：手动发送的私聊消息，观察原始 payload 是否携带会话标识
+                    log.info("[RAW-OUT-PRIVATE] %s", json.dumps(msg, ensure_ascii=False)[:500])
 
             # 1. 过滤
             ok, reason = self.filter.match(
@@ -97,79 +557,106 @@ class Consumer:
                 log.debug("跳过 [%s] %s: %s", group_name, sender, content[:30])
                 return
 
-            # 2. 入库
+            # 1.5 自动回复检查（只对"别人发来的"消息触发；自己发的不触发）
+            if not is_self:
+                try:
+                    self.replier.maybe_reply(
+                        group_name=group_name, sender=sender, content=content,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("replier 处理异常")
+
+            # 2. 计算 priority（命中重点关注群/联系人 → priority=1）
+            priority, prio_reason = self._compute_priority(group_name, sender)
+
+            # 3. 入库
             row_id = self.store.insert_message(
                 msg_id=msg_id,
                 group_name=group_name,
                 sender=sender,
-                sender_id=sender_id,
+                sender_id="",  # DLL 没单独给 senderId（与 wxid 同义）
                 content=content,
                 msg_type=msg_type,
-                received_at=ts,
+                received_at=ts or 0,  # 0 表示"未知时间"，store 会用当前时间
+                priority=priority,
+                direction=direction,
             )
             if row_id is None:
                 log.debug("重复消息，跳过: %s", msg_id)
                 return
-            log.info("入库 [%s] %s: %s (reason=%s)", group_name, sender, content[:50], reason)
+            if priority >= 1:
+                log.info("★入库 [%s] %s: %s (reason=%s, ★priority=%d %s)",
+                         group_name, sender, content[:50], reason, priority, prio_reason)
+            else:
+                log.info("入库 [%s] %s: %s (reason=%s)", group_name, sender, content[:50], reason)
 
-            # 3. LLM 评分
-            score, score_reason = self.scorer.score(
-                group_name=group_name, sender=sender, content=content
-            )
-            self.store.update_score(msg_id, score, score_reason)
-            log.info("评分 msg=%s score=%d (%s)", msg_id, score, score_reason)
+            # 3. LLM 评分 + 4. 高分推送（只对"别人发来的文本"；自发/非文本跳过，省 token）
+            if is_text and not is_self:
+                score, score_reason = self.scorer.score(
+                    group_name=group_name, sender=sender, content=content
+                )
+                self.store.update_score(msg_id, score, score_reason)
+                log.info("评分 msg=%s score=%d (%s)", msg_id, score, score_reason)
 
-            # 4. 高分推送
-            if score >= self.push_threshold:
-                title = f"[{score}] {group_name}"
-                body = f"{sender}: {content[:120]}"
-                pushed = self.notifier.push(title=title, body=body, group=group_name)
-                if pushed:
-                    self.store.mark_pushed(msg_id)
-                    log.info("已推送 msg=%s", msg_id)
+                # score_failed / score_skipped 不参与推送，避免 LLM 故障时批量误推
+                score_ok = not score_reason.startswith(("score_failed", "score_skipped"))
+                if score_ok and score >= self.push_threshold:
+                    title = f"[{score}] {group_name}"
+                    body = f"{sender}: {content[:120]}"
+                    pushed = self.notifier.push(title=title, body=body, group=group_name)
+                    if pushed:
+                        self.store.mark_pushed(msg_id)
+                        log.info("已推送 msg=%s", msg_id)
+            elif is_self:
+                log.debug("自发消息，跳过 LLM 评分/推送: %s", msg_id)
+            else:
+                log.debug("非文本消息（type=%d），跳过 LLM 评分/推送", msg_type)
 
         except Exception:  # noqa: BLE001
             log.exception("处理消息失败: %r", msg)
 
     def run(self) -> None:
-        ws_url = self.cfg["wcf"]["ws_url"]
-        log.info("连接 WechatFerry daemon: %s", ws_url)
+        # 启动期：探测 DLL 是否在
+        try:
+            status = self.hook.status()
+            log.info("DLL 在线: %s", status)
+        except HookError as e:
+            log.error("连不上 DLL: %s", e)
+            log.error("请确认微信已启动 + version.dll 在 WeChat 目录", exc_info=False)
+            sys.exit(3)
 
-        while not self._stop:
-            try:
-                ws = websocket.WebSocket()
-                ws.connect(ws_url)
-                # 订阅消息事件
-                ws.send(json.dumps({
-                    "type": "callback",
-                    "payload": json.dumps({"type": "msg"}),
-                }))
-                log.info("已订阅消息事件，开始接收...")
+        # 启动 HTTP server
+        self.start_server()
 
-                while not self._stop:
-                    raw = ws.recv()
-                    if not raw:
-                        continue
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        log.warning("非 JSON 消息: %s", raw[:200])
-                        continue
-                    if msg.get("type") == "msg":
-                        self.handle_message(msg)
-            except websocket.WebSocketException as e:
-                log.warning("WebSocket 断开/异常: %s，5 秒后重连", e)
-                time.sleep(5)
-            except Exception:  # noqa: BLE001
-                log.exception("主循环异常，5 秒后重连")
-                time.sleep(5)
+        # 注册回调
+        try:
+            self.register_callback()
+        except HookError as e:
+            log.error("注册回调失败: %s", e)
+            sys.exit(3)
+
+        # 阻塞直到 stop()
+        signal.signal(signal.SIGINT, self.stop)
+        signal.signal(signal.SIGTERM, self.stop)
+        log.info("进入消息循环。Ctrl+C 停止。")
+        try:
+            while not self._stop:
+                # serve_forever 跑在另一个线程，主线程 idle 等信号
+                # 用 sleep + flag 而不是 join，因为 shutdown 是阻塞的
+                import time
+                time.sleep(0.5)
+        finally:
+            log.info("清理资源...")
+            self.store.close()
 
 
 def main() -> None:
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        log.error("配置错误: %s", e)
+        sys.exit(2)
     consumer = Consumer(cfg)
-    signal.signal(signal.SIGINT, consumer.stop)
-    signal.signal(signal.SIGTERM, consumer.stop)
     consumer.run()
 
 

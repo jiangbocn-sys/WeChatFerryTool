@@ -32,11 +32,13 @@ class Notifier:
         payload = {
             "title": title[:60],
             "body": body[:200],
-            "group": "wechatferry",
             "level": "time-sensitive",
             "icon": "https://cdn-icons-png.flaticon.com/512/124/124034.png",
+            # 默认 group：Bark 用它做通知分组/折叠，"wechatferry" 表示本工具所有推送
+            "group": "wechatferry",
         }
         if group:
+            # 指定群时按群分组，同一群的消息在 Bark 上折叠成一条
             payload["group"] = f"wechatferry-{group[:20]}"
 
         try:

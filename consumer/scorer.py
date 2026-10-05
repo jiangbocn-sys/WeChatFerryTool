@@ -9,6 +9,8 @@
 
 返回 (score, reason)。
 """
+import re
+import time
 from dataclasses import dataclass
 
 
@@ -42,11 +44,21 @@ class Scorer:
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI  # 延迟导入
-            self._client = OpenAI(base_url=self.cfg.base_url, api_key=self.cfg.api_key)
+            self._client = OpenAI(
+                base_url=self.cfg.base_url,
+                api_key=self.cfg.api_key,
+                timeout=15.0,          # 单次 LLM 调用最长 15s
+                max_retries=0,         # 重试我们自己控制
+            )
         return self._client
 
     def score(self, *, group_name: str, sender: str, content: str) -> tuple[int, str]:
-        """返回 (1-5 的整数评分, 简短理由)。失败时返回 (3, "score_failed")。"""
+        """返回 (1-5 的整数评分, 简短理由)。
+
+        失败/未配置时返回 (3, "<前缀>: <原因>")，前缀为 "score_skipped" 或 "score_failed"。
+        调用方可通过判断 reason 前缀来决定是否触发推送，
+        避免 LLM 故障时反而批量推送中性分。
+        """
         if not self.cfg.api_key or self.cfg.api_key == "REPLACE_ME":
             return 3, "score_skipped: no api_key"
 
@@ -55,22 +67,35 @@ class Scorer:
             f"发送人：{sender}\n"
             f"消息内容：\n{content[:1500]}"
         )
-        try:
-            client = self._get_client()
-            resp = client.chat.completions.create(
-                model=self.cfg.model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-                temperature=0.0,
-                max_tokens=120,
-            )
-            text = resp.choices[0].message.content.strip()
-            return self._parse(text)
-        except Exception as e:  # noqa: BLE001
-            # 评分失败不阻塞主流程，给中性分
-            return 3, f"score_failed: {type(e).__name__}"
+        last_err: Exception | None = None
+        for attempt in range(3):  # 最多 3 次（含首次）
+            try:
+                client = self._get_client()
+                resp = client.chat.completions.create(
+                    model=self.cfg.model,
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=0.0,
+                    # 不设 max_tokens 限制：按实际用量计费，模型写完自然停
+                )
+                text = self._strip_think(resp.choices[0].message.content or "")
+                return self._parse(text)
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))  # 1.5s, 3s
+        # 评分失败不阻塞主流程，但 reason 明确标识为不可推送
+        return 3, f"score_failed: {type(last_err).__name__ if last_err else 'Unknown'}"
+
+    @staticmethod
+    def _strip_think(text: str) -> str:
+        """去掉推理模型的  thinking... 推理块（含被截断未闭合的情况）。"""
+        text = re.sub(r" thinking.*?\s*", "", text, flags=re.DOTALL)
+        if " thinking" in text:
+            text = text[: text.index(" thinking")]
+        return text.strip()
 
     @staticmethod
     def _parse(text: str) -> tuple[int, str]:
