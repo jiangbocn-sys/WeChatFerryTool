@@ -528,8 +528,8 @@ class Consumer:
             # 计算 is_self（是不是自己发的）
             # DLL 字段语义（最终确认的"作者模型"）：
             #   sender 字段 = 消息作者的 wxid（群、私聊都一样）
-            #   - 自己发的消息：sender == self_wxid（ruibo_jiang = 姜波/你）
-            #   - Mr.Gao 发的消息：sender == wxid_8cjwgonnvyq822
+            #   - 自己发的消息：sender == self_wxid（config.yaml 里配置的本人 wxid）
+            #   - 他人发的消息：sender == 对方 wxid
             # 辅以 sent_tracker（记录 consumer 自动回复发出去的消息）
             is_self = bool(self.self_wxid) and sender == self.self_wxid
             if not is_self and self.sent_tracker.is_self_sent(group_name, content, ts=ts or 0):

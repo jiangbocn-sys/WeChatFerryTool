@@ -38,15 +38,34 @@ def _documents_dir() -> Path:
         return Path.home() / "Documents"
 
 
+def _fallback_roots() -> list[Path]:
+    """兜底候选：Documents 被重定向到其他盘的自定义目录时使用。
+
+    不硬编码任何用户名或盘符：按 <盘>:/<用户目录>/Documents 与 <盘>:/Documents 逐个探测。
+    """
+    cands: list[Path] = [Path.home() / "Documents" / "xwechat_files"]
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+        base = Path(f"{letter}:/")
+        if not base.is_dir():
+            continue
+        cands.append(base / "Documents" / "xwechat_files")
+        try:
+            subs = [d for d in base.iterdir() if d.is_dir()]
+        except OSError:  # 无权限的盘/目录直接跳过
+            continue
+        cands.extend(sub / "Documents" / "xwechat_files" for sub in subs)
+    return cands
+
+
 def find_wechat_files_dir(account_wxid: str) -> Optional[Path]:
     """定位微信账号数据目录 <文档>/xwechat_files/<wxid>_xxxx。
 
-    account_wxid 例如 "ruibo_jiang"（self_wxid）。
+    account_wxid 例如 "wxid_xxxxxxxx"（config.yaml 里的 self_wxid）。
     """
     root = _documents_dir() / "xwechat_files"
     if not root.is_dir():
-        # 兜底：常见自定义位置
-        for cand in (Path("D:/JiangBo/Documents/xwechat_files"), Path("C:/Users") / Path.home().name / "Documents" / "xwechat_files"):
+        # 兜底：Documents 可能被重定向到其他盘
+        for cand in _fallback_roots():
             if cand.is_dir():
                 root = cand
                 break

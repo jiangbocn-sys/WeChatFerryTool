@@ -94,7 +94,7 @@
                     <input type="hidden" name="kind" value="senders">
                     <input type="hidden" name="key" value="{{ r.sender }}">
                     <input type="hidden" name="redirect" value="{{ request.full_path }}">
-                    <input type="text" name="name" value="{{ labels.senders[r.sender].name if labels.senders.get(r.sender) else '' }}" placeholder="显示名（如：Mr.Gao）">
+                    <input type="text" name="name" value="{{ labels.senders[r.sender].name if labels.senders.get(r.sender) else '' }}" placeholder="显示名（如：张三）">
                     <label><input type="checkbox" name="important" {% if labels.senders.get(r.sender, {}).get('important') %}checked{% endif %}> ★ 重点</label>
                     <button type="submit">保存</button>
                 </form>
