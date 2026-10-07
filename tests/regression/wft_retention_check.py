@@ -359,6 +359,10 @@ check("旧日期归档预览不 500（无数据也给出可读结果）",
 
 print("\n[CLI] python -m consumer.cleanup --dry-run --days 90")
 import subprocess  # noqa: E402
+
+# 子进程一律用 `creationflags=CREATE_NO_WINDOW`：这样 python.exe 不会去碰父进程的
+# 控制台（DSH 沙箱里读控制台缓冲会 WinError 5），同时也不弹窗。
+NO_WINDOW = 0x08000000
 py = str(PROJ / ".venv" / "Scripts" / "python.exe")
 env = dict(os.environ, WCF_DATA_DIR=str(SC), WCF_NO_MULTI_ACCOUNT="1",
            PYTHONIOENCODING="utf-8")
@@ -366,7 +370,8 @@ env = dict(os.environ, WCF_DATA_DIR=str(SC), WCF_NO_MULTI_ACCOUNT="1",
 out_file = SC / "cli.out"
 with open(out_file, "wb") as fh:
     rc = subprocess.run([py, "-B", "-m", "consumer.cleanup", "--dry-run", "--days", "90"],
-                        cwd=str(PROJ), env=env, stdout=fh, stderr=subprocess.STDOUT).returncode
+                        cwd=str(PROJ), env=env, stdout=fh, stderr=subprocess.STDOUT,
+                        creationflags=NO_WINDOW).returncode
 out = out_file.read_text(encoding="utf-8", errors="replace")
 check("CLI 退出码 0", rc == 0, str(rc))
 check("CLI 是 dry-run（不删数据）", "dry-run" in out,
@@ -374,6 +379,31 @@ check("CLI 是 dry-run（不删数据）", "dry-run" in out,
 check("CLI 报的命中条数与直接调用一致",
       f"命中（早于" in out and str(cleanup.count_older(SC / "data" / "messages.db", 90)) in out,
       out.strip().replace("\n", " ｜ ")[:150])
+
+print("\n[CLI] 冻结版 `--help` 不能在 GBK 控制台上崩（10-07 实测踩到的真 bug）")
+# 复现条件：真实控制台的 GBK 编码器 + 字符集 cp936。
+# 修复前 app/main.py 的帮助文本里有 ⚠️，argparse 打印帮助时直接 UnicodeEncodeError；
+# 修复后 main() 一开始就把 stdout 切成 UTF-8 容错，先按 GBK 编码再让 UTF-8 字节流出去。
+help_file = SC / "help.out"
+with open(help_file, "wb") as fh:
+    rc_help = subprocess.run(
+        [py, "-B", "-c",
+         "import sys;"
+         "sys.argv=['WeChatFerryApp.exe','--help'];"
+         "sys.stdout=open(sys.stdout.fileno(),'w',encoding='gbk',errors='strict',closefd=False);"
+         "sys.stderr=sys.stdout;"
+         "sys.path.insert(0, r'%s');"
+         "from app.main import main;"
+         "main(['--help'])" % PROJ],
+        cwd=str(SC), env=env, stdout=fh, stderr=subprocess.STDOUT,
+        creationflags=NO_WINDOW).returncode
+help_out = help_file.read_text(encoding="utf-8", errors="replace")
+check("GBK 控制台下 --help 退出码 0（修复前是 1）", rc_help == 0, f"rc={rc_help} ｜ {help_out.strip()[:90]}")
+check("--help 能看到用法（不是 traceback）",
+      "usage: WeChatFerryApp" in help_out and "Traceback" not in help_out,
+      help_out.strip().replace("\n", " ｜ ")[:150])
+check("风险提示仍在帮助里（只是不再用 ⚠ 字符）",
+      "注入" in help_out and "对话历史变空白" in help_out, "")
 
 print("=" * 60)
 if FAILS:

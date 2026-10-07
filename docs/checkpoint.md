@@ -39,6 +39,19 @@
   `git -c core.sshCommand="C:/Windows/System32/OpenSSH/ssh.exe -o StrictHostKeyChecking=accept-new" push origin main`
   —— 且写 `.git` 属于工作区外，shell 会被拒、需要一次授权升级。
 
+* **冻结版 `--help` 曾在 GBK 控制台上崩**（10-07 打包后实测）：帮助文本里有 `⚠️`，
+  `argparse` 打印帮助时 `UnicodeEncodeError`，用户连用法都看不到（退出码非 0）。
+  修法：`app/main.py` 抽出 `_force_utf8_stdio()`（stdout/stderr 切 UTF-8 + `errors="replace"`），
+  在 **`main()` 里 `argparse` 之前**就调用；并把帮助文本里的 `⚠️` 换成"警告："。
+  回归 `wft_retention_check` 用"真实 GBK 控制台（cp936）"子进程跑 `--help` 锁死这条
+  —— ⚠️ 所以**打包后要抽查一次 `--help`**，它是唯一能验证"冻结版 + 控制台编码"的入口。
+* **`dist/` 与 `build/` 目录的 ACL 会被写成"当前用户缺 WRITE_OWNER"**（10-07 遇到）：
+  打包时 PyInstaller 先在 `build\pyinstaller` 写 spec、再 `rmtree dist\WeChatFerryApp`，
+  两个目录权限不足时分别报 `PermissionError: [WinError 5]` / `[Errno 13]`。
+  处理：用技能 `diagnose-windows-sandbox-acl` 各跑一次（`-Path <目录> -AllowRoot D:\projects`），
+  会补上当前用户的完全控制项并复检；备份/回退在 `D:\projects\.acl-recovery-20261007\`。
+  修完 `dist` 之后**还要修 `build`**（同一条链上的两段），别以为修一个就够。
+
 * **多群总结现在是"每群一份"**（10-07，用户选定）：`digest.summarize_mode: per_group`（默认）→
   每个会话一份 `summary-<日期>-<群名>.md`、**每群一次 LLM 调用**；`combined` → 一份
   `summary-<日期>.md`、只调一次。文件名：清洗 Windows 非法字符、群 id 兜底时剥掉 `@chatroom`、

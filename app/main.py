@@ -273,6 +273,24 @@ log = logging.getLogger("app.main")
 
 
 # ---------------------------------------------------------------------------
+def _force_utf8_stdio() -> None:
+    """把控制台 stdout/stderr 切到 UTF-8 容错。
+
+    为什么必须在 **`argparse` 之前**调用：
+      * Windows 控制台默认 GBK，而 `--help` 的帮助文本里有 `⚠` 这类字符，
+        argparse 打印帮助时直接 `UnicodeEncodeError` 崩掉（实测：冻结版
+        `WeChatFerryApp.exe --help` 退出码非 0、连用法都看不到）；
+      * 同理，日志里的警告符号也会让 StreamHandler 报 "--- Logging error ---"。
+    `errors="replace"` 是兜底：真遇到编不出来的字符也只显示成 `?`，绝不抛异常。
+    --windowed 打包时这两个流是 None，直接跳过。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _setup_logging() -> None:
     """配好根 logger：控制台 + 文件。**文件日志写不了也不能让 app 起不来**。
 
@@ -281,14 +299,8 @@ def _setup_logging() -> None:
     """
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    # 控制台编码兜底：Windows 控制台默认 GBK，日志里的 ⚠️ 这类字符会让
-    # StreamHandler 抛 UnicodeEncodeError（"--- Logging error ---" 噪音）。
-    # 打包（无控制台）时 sys.stdout 是 None，忽略即可。
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(errors="replace")       # type: ignore[union-attr]
-        except Exception:  # noqa: BLE001
-            pass
+    # 控制台编码兜底（日志里的 ⚠️ 之类会让 StreamHandler 抛 UnicodeEncodeError）
+    _force_utf8_stdio()
     if not root.handlers:
         fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
         if sys.stdout is not None:       # --windowed 打包没有控制台
@@ -706,6 +718,9 @@ class App:
 
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
+    # 必须在 argparse 之前：否则 `--help` 里的 ⚠ 会在 GBK 控制台上
+    # UnicodeEncodeError 崩掉（冻结版实测踩到）。
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser(description="WeChatFerry 消息助手（先开 app，再管微信）")
     ap.add_argument("--replies", action="store_true",
                     help="启动时就启用自动回复（默认强制关闭）")
@@ -716,7 +731,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-launch", action="store_true", help="不自动启动微信，只等待")
     ap.add_argument("--inject-keys", action="store_true",
                     help="显式开启 keyhook 注入以采集数据库密钥。"
-                         "⚠️ 有风险：若在微信开库前注入，可能让微信读不出消息库"
+                         "警告：若在微信开库前注入，可能让微信读不出消息库"
                          "（对话历史变空白）。默认关闭；抓消息不需要它。")
     ap.add_argument("--account", default=None,
                     help="指定微信账号目录名（多账号隔离用；默认自动取最近活跃账号）")
