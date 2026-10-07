@@ -67,6 +67,16 @@ PROMPT_TEMPLATE = """你是一个群聊内容整理助手。
 4. 同一话题的连续发言合并为一条要点，不要逐句复述原文
 5. 不要编造记录中没有的信息；转写明显有误时标注「（转写存疑）」
 6. 忽略寒暄、表情与无实质内容的发言
+7. **语音转写的同音字词要纠错**（重要）：标记为「语音转文本」的内容是自动识别的，
+   常有同音错字。当某个词在上下文里读不通、但很像某个**术语/专名**时，请按上下文改成正确写法，
+   并**按改正后的意思理解**。已知的真实例子（持续补充）：
+   申金/神经、世爻/事要、辰土/尘土、六爻/六要、动爻/动要、旺相/王相、
+   干支/干枝、纳甲/那甲、卦爻/挂要、应爻/映要、入墓/入木、逢合/缝合、
+   旬空/寻空、太极/太急、方位/方为、罗盘/罗判。斜杠左边是正确术语。
+   不确定时按最符合上下文的写法处理，并在该条要点后用「（转写存疑）」标注。
+   ⚠️ 这段刻意只用 ASCII 的 `/` 与「」—— 早先用 `↔` 时，`--print-prompt` 在
+   GBK 控制台上会 `UnicodeEncodeError` 直接崩（10-07 被 wft_pergroup_check 逮到）。
+8. 不要因为上述纠错而编造记录里没有的信息；纠正范围仅限"读不通的同音词"。
 {extra_rules}
 发言记录：
 {body}
@@ -88,7 +98,7 @@ def _hints_block(hints: list[tuple[str, str]]) -> str:
     """
     if not hints:
         return ""
-    rule = ("7. **下面「本群总结提示」是群主对本群总结口径的要求，优先级高于上面的通用要求**："
+    rule = ("9. **下面「本群总结提示」是群主对本群总结口径的要求，优先级高于上面的通用要求**："
             "按提示决定该保留什么、该剔除什么（提示里点名的内容算正文；提示之外的噪音直接丢掉、"
             "不要写进总结）；若提示与本记录的实际情况不符，以记录为准并照常总结")
     lines = [rule, "", "本群总结提示："]
@@ -157,6 +167,30 @@ def build_lines(rows: list[sqlite3.Row], labels: dict) -> dict[str, list[str]]:
             f"[{hhmm}]{star}{sname}（{_type_label(int(r['msg_type'] or 0))}）：{body}"
         )
     return out
+
+
+def _safe_print(text: str) -> None:
+    """打印可能含任意字符的文本（prompt 里会带用户的提示文本、群名、emoji…）。
+
+    Windows 控制台默认 GBK：直接 print 会在遇到 `⚠️`/`↔` 这类字符时抛
+    `UnicodeEncodeError`（10-07 实测 `--print-prompt` 因此崩过）。
+    这里逐层降级：UTF-8 容错 → ASCII 替换 —— **任何情况下都不让打印把功能搞崩**。
+    """
+    try:
+        print(text)
+        return
+    except UnicodeEncodeError:
+        pass
+    try:
+        sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
+        print(text)
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        print(text.encode("ascii", "replace").decode("ascii"))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def gid_for_name(gname: str, labels: dict | None = None) -> str:
@@ -432,10 +466,10 @@ def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = 
         if run_mode == "per_group":
             for gid, lines in grouped.items():
                 gname = name_for_gid(gid, labels)
-                print(f"\n########## {gname}（{len(lines)} 条）##########")
-                print(build_prompt(date_str, {gid: lines}, labels))
+                _safe_print(f"\n########## {gname}（{len(lines)} 条）##########")
+                _safe_print(build_prompt(date_str, {gid: lines}, labels))
         else:
-            print(build_prompt(date_str, grouped))
+            _safe_print(build_prompt(date_str, grouped))
         return None
 
     llm_cfg = _llm_cfg()
@@ -496,7 +530,12 @@ def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = 
 
 
 def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    # 控制台可能是 GBK：必须带 errors="replace"，否则 prompt 里出现
+    # `↔`/`⚠️` 这类字符时 --print-prompt 会 UnicodeEncodeError 直接崩（10-07 踩到）
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001
+        pass
     ap = argparse.ArgumentParser(description="当日归档 → LLM 归纳总结")
     ap.add_argument("--date", default=(datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
                     help="日期（默认昨天）")

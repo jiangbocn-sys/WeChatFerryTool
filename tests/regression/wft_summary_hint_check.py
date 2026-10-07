@@ -100,7 +100,7 @@ check("有该群 1 条", len(grouped.get(GID, [])) == 1, str(grouped))
 
 print("\n[C] build_prompt() 注入提示")
 p = S.build_prompt("2026-10-07", grouped, LABELS)
-check("含第 7 条规则", "7. **下面「本群总结提示」" in p)
+check("含「本群总结提示」规则条", "**下面「本群总结提示」" in p)
 check("含「本群总结提示」段", "本群总结提示：" in p)
 check("含提示原文", HINT in p)
 check("提示与该群名并列", f"- 【{GNAME}】" in p, p[p.find("本群总结提示"):][:120])
@@ -110,7 +110,11 @@ check("规则里说明了优先级", "优先级高于上面的通用要求" in p
 print("\n[D] 边界：无提示 / 花括号内容")
 p_no = S.build_prompt("2026-10-07", {"g@chatroom": ["[10:00] 甲（文本）：hi"]},
                       {"groups": {"g@chatroom": {"name": "别的群"}}})
-check("无提示 → 不出现第 7 条", "本群总结提示" not in p_no and "优先级高于" not in p_no)
+check("无提示 → 不出现「本群总结提示」段", "本群总结提示" not in p_no and "优先级高于" not in p_no)
+# 同音纠错规则（10-07 用户反馈）无论有没有"每群提示"都必须在
+check("**同音字纠错规则始终存在**（含真实例子）",
+      "语音转写的同音字词要纠错" in p_no and "申金/神经" in p_no and "世爻/事要" in p_no,
+      "规则缺失会导致模型按同音错字判错")
 p_brace = S.build_prompt("2026-10-07",
                          {GID: ['[10:00] 甲（文本）：<appmsg>{"k":"v"}</appmsg> {难度}']}, LABELS)
 check("正文含 {} 不会报错且原样保留", '{"k":"v"}' in p_brace and "{难度}" in p_brace)
