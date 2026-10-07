@@ -112,9 +112,13 @@ p_no = S.build_prompt("2026-10-07", {"g@chatroom": ["[10:00] 甲（文本）：h
                       {"groups": {"g@chatroom": {"name": "别的群"}}})
 check("无提示 → 不出现「本群总结提示」段", "本群总结提示" not in p_no and "优先级高于" not in p_no)
 # 同音纠错规则（10-07 用户反馈）无论有没有"每群提示"都必须在
-check("**同音字纠错规则始终存在**（含真实例子）",
-      "语音转写的同音字词要纠错" in p_no and "申金/神经" in p_no and "世爻/事要" in p_no,
+check("**同音字纠错规则始终存在**（教它按上下文推断）",
+      "语音转写的错字要按上下文推断" in p_no and "不是替换表" in p_no
+      and "读得通就**原样采信**" in p_no,
       "规则缺失会导致模型按同音错字判错")
+check("纠错规则明确禁止机械替换、并要求存疑标注",
+      "机械替换" in p_no and "（转写存疑）" in p_no,
+      "缺这条会把本来正确的词改坏")
 p_brace = S.build_prompt("2026-10-07",
                          {GID: ['[10:00] 甲（文本）：<appmsg>{"k":"v"}</appmsg> {难度}']}, LABELS)
 check("正文含 {} 不会报错且原样保留", '{"k":"v"}' in p_brace and "{难度}" in p_brace)
