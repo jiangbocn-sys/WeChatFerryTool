@@ -52,6 +52,19 @@
   会补上当前用户的完全控制项并复检；备份/回退在 `D:\projects\.acl-recovery-20261007\`。
   修完 `dist` 之后**还要修 `build`**（同一条链上的两段），别以为修一个就够。
 
+* **逐条 LLM 评分默认关闭（`llm.score_enabled: false`，10-07 用户决定）**：
+  以前每条"别人发来的文本消息"都要调一次大模型打 1~5 分并写 `score/score_reason`。
+  查过依赖面后确认它**只有一个真用途** —— 给 **Bark 推送**做阈值判断
+  （`score >= llm.push_threshold`）；**自动回复**走模板 trigger + 模板自身 scope，
+  **归档/总结**走 `digest._in_digest()` 的 priority（标定/监控名单/重点人/每群敏感关键词），
+  浏览页/仪表盘只是把 score 显示成标签，`scripts/browse.py`、`inspect_groups.py` 只打印它。
+  → 现在 `score_enabled=false`（默认）时**完全不调 LLM、不写 score、不推送**；
+  打开才恢复评分+推送。开关在总设置页「大模型」区块；`setup.default_config()` 与
+  `config.example.yaml` 都给了 false。
+  回归：`wft_ingest_scope_check` 第 5/6 段用 spy 断言"关掉后 scorer 零调用、库里 score 为 NULL；
+  打开后恢复调用与写入"。
+  ⚠️ 历史消息里已有的 score 不动（仍可查）；`llm.push_threshold` 现在只在评分开启时才有意义。
+
 * **入库范围已全开（R-002，10-07）**：`handle_message` **不再调用 `Filter.match`** ——
   所有会话都入库，只受 `storage.ingest_exclude_types`（表情 47 恒排除）限制。
   `filter.groups`（监控名单）**只决定 23:30 归档/总结范围**（`digest._monitored_groups()`），

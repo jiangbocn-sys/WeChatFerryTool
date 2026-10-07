@@ -622,8 +622,15 @@ def create_app() -> Flask:
              {"path": "llm.model", "label": "模型名", "kind": "text",
               "impact": "决定用哪个模型；填了接口不支持的模型名会直接报错",
               "suggest": "如 MiniMax-M3 / deepseek-chat / gpt-4o-mini"},
-             {"path": "llm.push_threshold", "label": "推送阈值（1~5）", "kind": "number", "min": 1, "max": 5,
-              "impact": "评分 ≥ 该值才标记为\"要推送\"；Bark 关闭时只影响标记，不会真发通知",
+             {"path": "llm.score_enabled", "label": "逐条消息用大模型评分（默认关闭）", "kind": "bool",
+              "impact": "开着会对**每条别人发来的文本消息**调一次大模型打分（1~5）并写进数据库。"
+                        "它唯一的实际用途是给 Bark 推送做阈值判断 —— **自动回复走模板匹配、"
+                        "归档走 priority（标定/监控名单/重点人），都不看这个分**。"
+                        "关掉后完全不调 LLM、不写 score，也不会有高分推送",
+              "suggest": "建议**关闭**（省钱、也少一层 LLM 依赖）；只有想让 Bark 按分数筛选推送时才打开"},
+             {"path": "llm.push_threshold", "label": "推送阈值（1~5，仅评分开启时生效）", "kind": "number", "min": 1, "max": 5,
+              "impact": "评分 ≥ 该值才标记为\"要推送\"；⚠️ **只在「逐条消息用大模型评分」开启时才有意义**"
+                        "（关掉评分就没有分数可比）。另外 Bark 关闭时只影响标记，不会真发通知",
               "suggest": "默认 4（只有高分才推）；调成 3 会多推、5 更少"},
          ]},
         {"key": "storage", "title": "存储 / 入库闸门", "fields": [

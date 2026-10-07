@@ -162,6 +162,52 @@ check("日志里有入库行", "入库 [" in out, out.strip()[-80:])
 check("日志里不再出现旧过滤原因 reason=group_match", "reason=group_match" not in out,
       out.strip()[-80:])
 
+print("\n[5] LLM 逐条评分默认关闭（llm.score_enabled=false）")
+calls: list[tuple] = []
+
+
+class _SpyScorer:
+    def score(self, **kw):
+        calls.append(("score", kw.get("content", "")[:20]))
+        return 5, "spy"
+
+
+cons.scorer = _SpyScorer()
+cons.score_enabled = False
+cons.handle_message({"event_type": 1001, "type": 1, "msgid": "noscore", "wxid": MON_GROUP,
+                     "roomid": MON_GROUP, "sender": "wxid_ns", "content": "这条不该被评分",
+                     "timestamp": int(datetime.now().timestamp())})
+check("关掉后**完全没调用** scorer", calls == [], str(calls))
+row = cons.store._conn.execute(
+    "SELECT score, score_reason FROM messages WHERE msg_id='noscore'").fetchone()
+check("关掉后库里不写 score", row is not None and row[0] is None and row[1] is None,
+      f"score={row[0] if row else '?'} reason={row[1] if row else '?'}")
+
+# 打开开关时应恢复评分（用 spy 验证调用发生）
+calls.clear()
+cons.score_enabled = True
+cons.handle_message({"event_type": 1001, "type": 1, "msgid": "withscore", "wxid": MON_GROUP,
+                     "roomid": MON_GROUP, "sender": "wxid_ws", "content": "这条应该被评分",
+                     "timestamp": int(datetime.now().timestamp())})
+check("打开后重新调用 scorer", len(calls) == 1, str(calls))
+row2 = cons.store._conn.execute(
+    "SELECT score FROM messages WHERE msg_id='withscore'").fetchone()
+check("打开后写入了 score", row2 is not None and row2[0] == 5, str(row2))
+cons.score_enabled = False     # 复位，避免影响后续
+
+print("\n[6] 新装的默认配置里 score_enabled 是 false")
+import setup as setup_mod  # noqa: E402
+default_cfg = setup_mod.default_config({"llm_base_url": "https://x/v1", "llm_api_key": "k",
+                                        "llm_model": "m"})
+check("setup.default_config() 里 score_enabled=False",
+      default_cfg.get("llm", {}).get("score_enabled") is False,
+      str(default_cfg.get("llm", {}).get("score_enabled")))
+ex = (PROJ / "config.example.yaml").read_text(encoding="utf-8")
+check("config.example.yaml 里写了 score_enabled: false",
+      "score_enabled: false" in ex)
+app_src = (PROJ / "web" / "app.py").read_text(encoding="utf-8")
+check("总设置页有该开关且标了默认关闭", "llm.score_enabled" in app_src and "默认关闭" in app_src)
+
 cons.stop()
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)

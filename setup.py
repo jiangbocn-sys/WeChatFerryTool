@@ -85,6 +85,8 @@ def default_config(ans: dict) -> dict:
             "api_key": str(ans.get("llm_api_key") or "").strip(),
             "model": str(ans.get("llm_model") or "").strip(),
             "push_threshold": 4,
+            # 逐条 LLM 评分：默认关闭（只给 Bark 推送做阈值判断；回复/归档都不依赖它）
+            "score_enabled": False,
         },
         "bark": {"enabled": False, "server": "https://api.day.app", "key": "REPLACE_ME"},
         "storage": {

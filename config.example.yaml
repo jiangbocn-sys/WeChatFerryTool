@@ -32,7 +32,12 @@ llm:
   base_url: https://api.deepseek.com/v1
   api_key: REPLACE_ME
   model: deepseek-chat
-  # 评分阈值，>= threshold 的会推送通知
+  # 逐条消息让 LLM 打分（1~5，写进数据库的 score 列）。
+  # ⚠️ 默认关闭：它唯一的实际用途是给 Bark 推送做阈值判断；
+  #    自动回复走模板匹配、当日归档走 priority（标定/监控名单/重点人），都不看这个分。
+  #    打开 = 每条别人发来的文本消息一次 LLM 调用（花额度）。
+  score_enabled: false
+  # 评分阈值，>= threshold 的会推送通知（仅在 score_enabled 打开时生效）
   push_threshold: 4
 
 # 推送通道

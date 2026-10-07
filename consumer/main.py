@@ -158,6 +158,11 @@ class Consumer:
             if bark_cfg.get("enabled") else None
         )
         self.push_threshold = int(cfg["llm"].get("push_threshold", 4))
+        # 逐条 LLM 评分：默认关闭（见 handle_message 里的说明）
+        self.score_enabled = bool(cfg["llm"].get("score_enabled", False))
+        if not self.score_enabled:
+            log.info("LLM 逐条评分：已关闭（llm.score_enabled=false）—— 不调 LLM、不写 score；"
+                     "归档仍按 priority（标定/监控名单/重点人）判定")
 
         hook_cfg = cfg["hook"]
         self.hook = HookClient(HookConfig(
@@ -770,8 +775,14 @@ class Consumer:
             else:
                 log.info("入库 [%s] %s: %s", group_name, sender, content[:50])
 
-            # 3. LLM 评分 + 4. 高分推送（只对"别人发来的文本"；自发/非文本跳过，省 token）
-            if is_text and not is_self:
+            # 3. LLM 评分 + 4. 高分推送
+            #    ⚠️ 默认**关闭**（`llm.score_enabled: false`，2026-10-07 用户决定）：
+            #    逐条评分要花额度，而它唯一的真用途是给 Bark 推送做阈值判断
+            #    （自动回复走模板匹配、归档走 priority，都不看 score）。
+            #    关掉后**完全不调 LLM**，也不写 score/score_reason。
+            if not self.score_enabled:
+                log.debug("LLM 评分已关闭（llm.score_enabled=false），跳过评分与推送: %s", msg_id)
+            elif is_text and not is_self:
                 score, score_reason = self.scorer.score(
                     group_name=group_name, sender=sender, content=content
                 )
