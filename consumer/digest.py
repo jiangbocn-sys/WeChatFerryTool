@@ -126,28 +126,23 @@ def generate_digest(
 
 
 def _render_content(m: sqlite3.Row) -> str:
-    msg_type = m["msg_type"]
-    content = (m["content"] or "").strip()
-    if msg_type == 1:
-        return content.replace("\n", " ")
-    if msg_type == 34:  # 语音
-        trans = (m["transcript"] or "").strip()
-        if trans and not trans.startswith("[待转写]") and not trans.startswith("[解码失败]"):
-            return f"[语音] {trans}"
-        # 解析时长
-        import re
-        mm = re.search(r'voicelength="(\d+)"', content)
-        secs = round(int(mm.group(1)) / 1000) if mm else 0
-        return f"[语音 ~{secs}s]（未转写）"
-    # 其他类型
-    label = _TYPE_LABEL.get(msg_type, f"type={msg_type}")
-    # 49 类尝试提取 title
-    if msg_type == 49:
-        import re
-        tm = re.search(r"<title>([^<]{0,60})</title>", content)
-        if tm:
-            return f"[{label}] {tm.group(1)}"
-    return f"[{label}]"
+    """归档里每条消息的单行摘要。
+
+    2026-10-07 起统一走 `consumer/cards.py`：图片/视频/链接/引用/文件不再只显示
+    `[图片]` `[链接]`，而是带上尺寸、大小、标题、被引用的人与原话等 —— web 浏览页
+    与归档用的是**同一个解析器**，不会两处不一致。
+    """
+    from consumer import cards as cards_mod   # 局部 import：避免 consumer 内部循环依赖
+
+    try:
+        return cards_mod.summary_line(
+            m["msg_type"], m["content"] or "",
+            transcript=(m["transcript"] or ""),
+        )
+    except Exception:  # noqa: BLE001
+        # 解析器出问题也绝不能影响归档生成
+        label = _TYPE_LABEL.get(m["msg_type"], f"type={m['msg_type']}")
+        return f"[{label}]"
 
 
 def _exclude_types() -> set[int]:
@@ -165,18 +160,27 @@ def _exclude_types() -> set[int]:
 
 
 def _kw_haystack(row) -> str:
-    """关键词匹配用的文本。
+    """关键词匹配用的文本（每群的"敏感关键词"命中判定用）。
 
     **不能只搜 content**：语音正文只在 transcript 列；图片/视频的 content 是 XML，
-    有意义的文字在 title/des 属性里。
+    有意义的文字在属性/子标签里；**引用回复**的关键信息在被引用的原话里
+    （`<refermsg><content>`）—— 2026-10-07 起统一用 cards.summary_line() 兜底，
+    它会把 title/des/引用内容/文件名/位置名都拼出来。
     """
     import re
     xml = row["content"] or ""
     parts = [xml, row["transcript"] or ""]
     if "<" in xml:
         for pat in (r"<title>(.*?)</title>", r'\btitle="([^"]{1,80})"',
-                    r'\bdes="([^"]{1,120})"'):
+                    r'\bdes="([^"]{1,120})"', r"<content>(.*?)</content>",
+                    r'\bpoiname="([^"]{1,80})"'):
             parts.extend(m.group(1) for m in re.finditer(pat, xml, re.S))
+    try:
+        from consumer import cards as cards_mod
+        parts.append(cards_mod.summary_line(row["msg_type"], xml,
+                                            transcript=(row["transcript"] or "")))
+    except Exception:  # noqa: BLE001
+        pass
     return "\n".join(parts).lower()
 
 

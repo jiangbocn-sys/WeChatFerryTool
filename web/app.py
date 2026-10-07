@@ -1905,7 +1905,7 @@ def create_app() -> Flask:
         # 2) 查当页（OFFSET/LIMIT）
         offset = (page - 1) * per_page
         sql = (
-            "SELECT id, msg_id, group_name, sender, substr(content,1,200) AS preview, "
+            "SELECT id, msg_id, group_name, sender, content, "
             "msg_type, direction, score, score_reason, received_at, priority, pushed, transcript "
             "FROM messages WHERE 1=1"
             + where_sql
@@ -1933,6 +1933,16 @@ def create_app() -> Flask:
             r["group_important"] = g.get("important", False)
             r["sender_important"] = s.get("important", False)
             r["ts"] = fmt_ts(r["received_at"])
+            # 把原始 payload 解析成"卡片"（图片/链接/引用/文件…），模板按 kind 渲染。
+            # 解析是纯函数、零依赖、不会抛异常；失败时退回原始文本预览。
+            try:
+                import consumer.cards as cards_mod
+                r["card"] = cards_mod.parse(r.get("msg_type") or 0, r.get("content") or "")
+                if (r.get("msg_type") or 0) == 34 and (r.get("transcript") or "").strip():
+                    r["card"]["transcript"] = r["transcript"]
+            except Exception:  # noqa: BLE001
+                r["card"] = None
+            r["preview"] = (r.get("content") or "")[:200]
 
         total_pages = max(1, (total + per_page - 1) // per_page) if total else 0
         # 超过最大页数时重定向到最后一页

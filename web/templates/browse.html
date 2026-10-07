@@ -95,6 +95,8 @@
             {% else %}<span class="tag">❓方向未知</span>
             {% endif %}
             {% if r.msg_type == 6 %}<span class="tag">📎文件</span>
+            {% elif r.msg_type == 49 and r.card and r.card.get('kind') == 'quote' %}<span class="tag">💬引用</span>
+            {% elif r.msg_type == 49 and r.card and r.card.get('label') %}<span class="tag">{{ r.card.get('label') }}</span>
             {% elif r.msg_type == 49 %}<span class="tag">🔗链接</span>
             {% elif r.msg_type == 51 %}<span class="tag">⚙️系统</span>
             {% elif r.msg_type != 1 %}<span class="tag">type={{ r.msg_type }}</span>
@@ -136,7 +138,42 @@
             {% else %}<span class="muted">未评分</span>{% endif %}
         </div>
         <div class="content">
-            {% if r.msg_type == 34 %}
+            {% set card = r.card %}
+            {% if card and card.kind == 'quote' %}
+                <div class="cardquote">
+                    <div class="qfrom">{{ card.quote_from or '（未知）' }}：</div>
+                    <div class="qtext">{{ card.quote_text or '（原消息为空/不可见）' }}</div>
+                </div>
+                {% if card.text %}<div class="qnote">{{ card.text }}</div>{% endif %}
+            {% elif card and card.kind == 'link' %}
+                <div class="linkcard">
+                    <a class="lctitle" href="{{ card.url }}" target="_blank" rel="noopener noreferrer">{{ card.title }}</a>
+                    {% if card.desc %}<div class="lcdesc">{{ card.desc }}</div>{% endif %}
+                    <div class="lcmeta">{{ card.url }}{% if card.app %} · {{ card.app }}{% endif %}</div>
+                </div>
+            {% elif card and card.kind == 'image' %}
+                <span class="tag">🖼 图片</span>
+                <span class="muted">
+                    {{ card.width }}×{{ card.height }}{% if card.size_h %} · {{ card.size_h }}{% endif %}
+                    {% if not card.aeskey %} · 元数据不全{% endif %}
+                </span>
+            {% elif card and card.kind == 'video' %}
+                <span class="tag">🎬 视频</span>
+                <span class="muted">{{ card.width }}×{{ card.height }}{% if card.size_h %} · {{ card.size_h }}{% endif %}{% if card.duration %} · {{ card.duration }}s{% endif %}</span>
+            {% elif card and card.kind == 'file' %}
+                <span class="tag">📎 文件</span> {{ card.title }}{% if card.size_h %} <span class="muted">（{{ card.size_h }}）</span>{% endif %}
+            {% elif card and card.kind == 'location' %}
+                <span class="tag">📍 位置</span> {{ card.poiname }}{% if card.label %} <span class="muted">{{ card.label }}</span>{% endif %}
+            {% elif card and card.kind == 'card' %}
+                <span class="tag">👤 名片</span> {{ card.nickname or card.username }}
+            {% elif card and card.kind == 'call' %}
+                <span class="tag">📞 通话</span> {{ card.text }}{% if card.duration %} <span class="muted">{{ card.duration }}s</span>{% endif %}
+            {% elif card and card.kind == 'revoke' %}
+                <span class="muted">{{ card.text }}</span>
+            {% elif card and card.kind == 'unsupported' %}
+                <span class="tag">{{ card.label }}</span>
+                {% if card.title %}{{ card.title }}{% elif card.text %}<span class="muted">{{ card.text }}</span>{% endif %}
+            {% elif r.msg_type == 34 %}
                 <span class="muted">[语音]</span>
                 {% if r.transcript and not r.transcript.startswith('[') %}{{ r.transcript[:300] }}{% if r.transcript|length > 300 %}…{% endif %}
                 {% else %}<span class="muted">（未转写）</span>{% endif %}
@@ -190,6 +227,35 @@
     padding: 16px;
 }
 .pagination .button { text-decoration: none; }
+
+/* 引用回复（群里上下文的关键） */
+.cardquote {
+    border-left: 3px solid #95a5a6;
+    background: #f7f8f9;
+    padding: 5px 9px;
+    margin: 2px 0 4px;
+    border-radius: 3px;
+    font-size: 12.5px;
+    color: #555;
+    white-space: pre-wrap;
+}
+.cardquote .qfrom { font-weight: 600; color: #7f8c8d; }
+.cardquote .qtext { margin-top: 2px; }
+.qnote { margin-top: 3px; }
+
+/* 链接 / 图文卡片 */
+.linkcard {
+    border: 1px solid #e1e6ea;
+    border-left: 3px solid #3498db;
+    background: #fbfdff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    max-width: 620px;
+}
+.linkcard .lctitle { font-weight: 600; color: #2471a3; text-decoration: none; }
+.linkcard .lctitle:hover { text-decoration: underline; }
+.linkcard .lcdesc { font-size: 12.5px; color: #56606a; margin-top: 3px; white-space: pre-wrap; }
+.linkcard .lcmeta { font-size: 11px; color: #95a5a6; margin-top: 4px; word-break: break-all; }
 </style>
 
 {% endblock %}

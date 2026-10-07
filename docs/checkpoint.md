@@ -68,6 +68,38 @@
   我在新回归里就打开过真库（进程里出现 4233 条），幸亏那是老副本。
   对策：**测试/脚本里一律用绝对路径**；想彻底修就改 Store 走"数据根优先"（未做，记在这）。
 
+* **消息卡片解析统一在 `consumer/cards.py`**（10-07 新增）：浏览页与归档/总结**共用同一个解析器**，
+  不再各自实现（以前浏览页直接吐 XML、归档只有 `[图片]`）。
+  * `cards.parse(msg_type, content)` → 结构化；`cards.summary_line(...)` → 归档用单行摘要。
+  * 覆盖：图片(尺寸/大小/md5)、视频(尺寸/大小/时长)、引用回复(被引用人+原话，**嵌套引用再解析一层**)、
+    链接、文件、位置、名片、通话、撤回、语音(优先转写)。
+  * ⚠️ **属性名取值的坑**：`_attr(raw, "length")` 会先匹配到 `cdnthumblength`（下划线是 \w 字符，
+    `\b` 挡不住）→ 实测把缩略图长度当成原图大小。已用 `(?<![A-Za-z0-9_])` 前缀断言修掉，
+    被 `wft_cards_check` 锁住。任何"按名字取属性"的地方都要注意这个。
+  * 系统类消息（type 51/10000，如 `<op id=5><name>lastMessage</name>`）**只显示 `[系统]`**，
+    不吐内部 JSON（它们本来就没人类可读正文，且「消息分类」默认已挡在库外）。
+  * 真库校验：4415 条消息解析 0 报错、摘要 0 条含 XML 特征。
+
+* **图片"还原成图"的可行性（10-07 实测，已通 2.5 步，未接 UI）**：
+  * **消息 → 本地文件**（已通）：微信 `db_storage\message\message_resource.db`（**同一把已采密钥**，
+    `db_key_map.json` key_index 14）里 `MessageResourceInfo.message_svr_id` = 我们的 `msg_id`，
+    其 `packed_info` 就是**本地文件名 stem**（如 `ddece4375134faa154cd693fe53a6d48`）；
+    再用 `db_storage\hardlink\hardlink.db` 的 `image_hardlink_info_v4`（`md5_hash/md5/type/file_name/
+    file_size/dir1/dir2`）与 `dir2id` 拼出完整路径
+    `msg\attach\<会话md5>\<月>\Img\<stem>[_t|_h].dat`。
+    现成脚本：`tools\probe_wx_resource.py`（只读快照 + 解密 + 按消息 id 反查）。
+  * **`.dat` 解密**（差最后一步）：微信 4.x 的 `.dat` = 自研容器（头 15 字节 `07 08 56 32 08 07 00 04
+    00 00 <len> 00 00 01 xx`）+ AES-128-ECB + **单字节 XOR**（公开实现
+    [chatlog/dat2img](https://pkg.go.dev/github.com/sjzar/chatlog@v0.0.11/pkg/util/dat2img)：
+    v4 = AES-ECB + XOR，XOR key 靠扫 `_t.dat` 反推，默认 0x37）。
+    10-07 实测：整文件单纯 AES 或单纯 XOR 都不出 JPEG；但用"JPEG 以 `FF D9` 结尾"这个判据
+    **反推出该图的 XOR key = 0xF9** → 格式可逆，只差把"哪一段被 XOR、AES 块边界"定死。
+    探针：`tools\probe_img_aes.py`（**纯 Python AES-128-ECB，已过 FIPS-197 自检**，可作零依赖兜底）
+    与 `tools\probe_img_aes2.py`（组合暴力试）。
+  * 已确认可用的判据：本地 `msg\video\*.jpg` 有 65 个**明文** JPEG，可当"已知明文"反推映射。
+  * 后续：新增 `GET /media/<msg_id>`（只读原库 + 解密 + 缓存 `data/media_cache/`），浏览页内联；
+    归档里图片目前是 `[图片 214×480 · 478 KB]`，接视觉模型描述是**另一个开关**（花 token）。
+
 * **语音「会话名手工映射」（`voice.conv_overrides`）的键同时认 32 位与 8 位前缀**（10-07 修）：
   语音文件叫 `<会话md5>_<毫秒>.bin`，`_reverse_conv_map()` 现在**统一按前 8 位建键**
   （完整 hash 也留一份），`_sweep_orphans()` 用 `_conv_key()` 截前 8 位再查 ——
