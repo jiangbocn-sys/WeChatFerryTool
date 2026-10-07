@@ -38,12 +38,14 @@ from consumer.digest import (  # noqa: E402
     _load_labels,
     _monitored_groups,
     _render_content,
+    _summary_hint,
 )
 from paths import data_root  # noqa: E402
 
 log = logging.getLogger("consumer.summarize")
 
 PROJECT_DIR = data_root()
+LABELS_PATH = PROJECT_DIR / "data" / "labels.json"
 
 PROMPT_TEMPLATE = """你是一个群聊内容整理助手。
 
@@ -61,11 +63,35 @@ PROMPT_TEMPLATE = """你是一个群聊内容整理助手。
 4. 同一话题的连续发言合并为一条要点，不要逐句复述原文
 5. 不要编造记录中没有的信息；转写明显有误时标注「（转写存疑）」
 6. 忽略寒暄、表情与无实质内容的发言
-
+{extra_rules}
 发言记录：
 {body}
 
 请开始总结（只输出总结内容，不要重复贴回原文）："""
+
+#: 有"每群总结提示"时追加的规则段（{hints} 由 build_prompt 填）
+HINTS_RULE = """7. **下面「本群总结提示」是群主对总结口径的要求，优先级高于上面的通用要求**：
+   按提示决定该保留什么、该剔除什么（提示里点名的内容算正文，提示之外的噪音直接丢掉，
+   不要写进总结）；若提示与本记录的实际情况不符，以记录为准并照常总结
+"""
+
+
+def _hints_block(hints: list[tuple[str, str]]) -> str:
+    """拼"每群总结提示"规则段（(群显示名, 提示) 列表）。无提示则返回空串。
+
+    注意：这里返回的内容会填进模板的 `{extra_rules}` —— 它必须**同时**
+    包含"第 7 条要求"和提示清单（踩过：只返回清单会导致规则说明丢失）。
+    """
+    if not hints:
+        return ""
+    rule = ("7. **下面「本群总结提示」是群主对本群总结口径的要求，优先级高于上面的通用要求**："
+            "按提示决定该保留什么、该剔除什么（提示里点名的内容算正文；提示之外的噪音直接丢掉、"
+            "不要写进总结）；若提示与本记录的实际情况不符，以记录为准并照常总结")
+    lines = [rule, "", "本群总结提示："]
+    for gname, hint in hints:
+        lines.append(f"- 【{gname}】{hint}")
+    return "\n".join(lines) + "\n"
+
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +124,8 @@ def _type_label(msg_type: int) -> str:
 def build_lines(rows: list[sqlite3.Row], labels: dict) -> dict[str, list[str]]:
     """按会话分组，逐条生成 `[HH:MM] 发送人（类型）：内容`。
 
-    返回 {群显示名: [行, ...]}，顺带在此处套用归档判定。
+    返回 **{群 id: [行, ...]}**（2026-10-07 起用 id 而不是显示名 —— 因为"每群总结提示"
+    是按 id 存在 labels 里的，用显示名会查不到；渲染时名字用 `labels` 兜底）。
 
     ⚠️ **必须把"监控名单"一起传进 `_in_digest`** —— 否则归档（`generate_digest`
     传了 monitored）与总结（这里没传）的选取范围会不一致：归档里有的消息，
@@ -120,20 +147,72 @@ def build_lines(rows: list[sqlite3.Row], labels: dict) -> dict[str, list[str]]:
         sname = ((labels.get("senders") or {}).get(skey) or {}).get("name") or skey
 
         body = _render_content(r).replace("\n", " ").strip()
-        out.setdefault(gname, []).append(
+        out.setdefault(gkey, []).append(
             f"[{hhmm}] {sname}（{_type_label(int(r['msg_type'] or 0))}）：{body}"
         )
     return out
 
 
-def build_prompt(date_str: str, grouped: dict[str, list[str]]) -> str:
-    """把分组后的记录拼成 prompt（含你的要求：按顺序逐条总结核心要点）。"""
+def gid_for_name(gname: str, labels: dict | None = None) -> str:
+    """显示名 → 群 id（找不到就原样返回）。
+
+    兼容旧调用：`build_prompt` 以前收的是 `{群显示名: [...]}`，现在收 `{群 id: [...]}`，
+    两种都认。
+    """
+    if labels:
+        for gid, ent in (labels.get("groups") or {}).items():
+            if ((ent or {}).get("name") or "") == gname:
+                return gid
+    return gname
+
+
+def name_for_gid(gid: str, labels: dict | None = None) -> str:
+    """群 id → 显示名（没标定就返回 id）。
+
+    用于 per_group 的**文件名**和 prompt 里的群标题 —— `build_lines()` 从 10-07 起
+    以群 id 为键（因为"每群总结提示"是按 id 存的），所以这里要显式换回人看的名字，
+    否则文件名会变成 `summary-<日期>-50279811726@chatroom.md`。
+    """
+    if labels:
+        ent = (labels.get("groups") or {}).get(gid) or {}
+        nm = str(ent.get("name") or "").strip()
+        if nm:
+            return nm
+    return gid
+
+
+def build_prompt(date_str: str, grouped: dict[str, list[str]],
+                 labels: dict | None = None) -> str:
+    """把分组后的记录拼成 prompt。
+
+    `grouped` 的键可以是**群 id**（新）或**群显示名**（旧调用点，会用 labels 反查 id）。
+    每个群的「总结提示」（`labels.groups.<id>.summary_hint`）会作为独立段落一起提交，
+    让模型按群主的口径决定保留什么、剔除什么噪音。
+    """
+    if labels is None:
+        try:
+            labels = _load_labels(LABELS_PATH)
+        except Exception:  # noqa: BLE001
+            labels = {}
+    groups_meta = labels.get("groups") or {}
+
     blocks: list[str] = []
-    for gname, lines in grouped.items():
+    hints: list[tuple[str, str]] = []
+    for key, lines in grouped.items():
+        gid = key if key in groups_meta else gid_for_name(key, labels)
+        ent = groups_meta.get(gid) or {}
+        gname = str(ent.get("name") or key)
+        hint = _summary_hint(gid, labels)
+        if hint:
+            hints.append((gname, hint))
         blocks.append(f"### 群：{gname}（{len(lines)} 条）")
         blocks.extend(lines)
         blocks.append("")
-    return PROMPT_TEMPLATE.format(date=date_str, body="\n".join(blocks).strip())
+    # 注意用 replace 而不是 str.format：body 里含 `{`／`}`（XML/JSON 片段）会炸 format
+    return (PROMPT_TEMPLATE
+            .replace("{date}", date_str)
+            .replace("{extra_rules}", _hints_block(hints))
+            .replace("{body}", "\n".join(blocks).strip()))
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +371,8 @@ def safe_name(text: str, fallback: str = "group") -> str:
 
 
 def _write_summary_file(path: Path, date_str: str, group: str, total: int, summary: str,
-                        llm_cfg: dict, grouped: dict[str, list[str]], run_mode: str) -> None:
+                        llm_cfg: dict, grouped: dict[str, list[str]], run_mode: str,
+                        labels: dict | None = None) -> None:
     head = [
         f"# 当日归档总结 · {date_str}" + (f" · {group}" if group else ""),
         "",
@@ -309,8 +389,8 @@ def _write_summary_file(path: Path, date_str: str, group: str, total: int, summa
         "## 附：提交给模型的原始记录",
         "",
     ]
-    for gname, lines in grouped.items():
-        head.append(f"### {gname}")
+    for gid, lines in grouped.items():
+        head.append(f"### {name_for_gid(gid, labels)}")
         head.extend(lines)
         head.append("")
     path.write_text("\n".join(head), encoding="utf-8")
@@ -342,30 +422,34 @@ def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = 
         run_mode = "per_group"
 
     if print_prompt:
+        labels = _load_labels(LABELS_PATH)
         if run_mode == "per_group":
-            for gname, lines in grouped.items():
+            for gid, lines in grouped.items():
+                gname = name_for_gid(gid, labels)
                 print(f"\n########## {gname}（{len(lines)} 条）##########")
-                print(build_prompt(date_str, {gname: lines}))
+                print(build_prompt(date_str, {gid: lines}, labels))
         else:
             print(build_prompt(date_str, grouped))
         return None
 
     llm_cfg = _llm_cfg()
+    labels = _load_labels(LABELS_PATH)
     out_dir = out_dir or (PROJECT_DIR / "reports")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 每群一份 vs 合并一份
     chunks: list[tuple[str, dict[str, list[str]], int]] = []
     if run_mode == "per_group":
-        for gname, lines in grouped.items():
-            chunks.append((gname, {gname: lines}, len(lines)))
+        for gid, lines in grouped.items():
+            chunks.append((gid, {gid: lines}, len(lines)))
     else:
         chunks.append(("", grouped, total))
 
     run = SummarizeRun(date=date_str, mode=run_mode, total=total)
     used: set[str] = set()
-    for gname, sub_grouped, sub_total in chunks:
-        prompt = build_prompt(date_str, sub_grouped)
+    for gid, sub_grouped, sub_total in chunks:
+        gname = name_for_gid(gid, labels) if gid else ""
+        prompt = build_prompt(date_str, sub_grouped, labels)
         log.info("[%s] %d 条，prompt %d 字", gname or "合并", sub_total, len(prompt))
         try:
             summary = strip_think(call_llm(prompt, llm_cfg))
@@ -377,9 +461,10 @@ def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = 
             run.errors.append(f"{gname or '合并'}: {type(e).__name__}: {e}")
             continue
 
-        if gname:
-            # 群 id 兜底时剥掉 @chatroom 尾巴，文件名更干净（g4@chatroom → g4）
-            label = gname[:-len("@chatroom")] if gname.endswith("@chatroom") else gname
+        if gid:
+            # 没标定时用群 id（剥掉 @chatroom 尾巴让文件名干净些：g4@chatroom → g4）
+            label = gname if gname != gid else (
+                gid[:-len("@chatroom")] if gid.endswith("@chatroom") else gid)
             base = f"summary-{date_str}-{safe_name(label, fallback='group')}"
         else:
             base = f"summary-{date_str}"
@@ -391,7 +476,8 @@ def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = 
             n += 1
         used.add(name)
         path = out_dir / name
-        _write_summary_file(path, date_str, gname, sub_total, summary, llm_cfg, sub_grouped, run_mode)
+        _write_summary_file(path, date_str, gname, sub_total, summary, llm_cfg, sub_grouped, run_mode,
+                            labels)
         log.info("总结已写入: %s", path)
         run.results.append(SummarizeResult(
             date=date_str, path=path, total=sub_total, conversations=len(sub_grouped),

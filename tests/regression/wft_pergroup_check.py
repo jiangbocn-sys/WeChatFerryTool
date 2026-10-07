@@ -126,12 +126,26 @@ for r in run.results:
     check(f"「{r.group}」的正文只含本群",
           r.group in body and all(o not in body.split("## 附")[0] for o in ()),
           "")
-# 每份文件的 prompt 只含自己的群
+# 每份文件的 prompt 只含自己的群。
+# ⚠️ 10-07 起 grouped 的键是**群 id**（因为"每群总结提示"按 id 存）；而夹具里的
+#    id 是 g1@chatroom/g2@chatroom…，互相包含（g1 是 g2 的子串）→ 直接
+#    `all(o not in body)` 会假阳性。改为：用**该群的原始记录行**判断，
+#    并额外断言"正文标题是显示名而不是 id"。
+import json as _json  # noqa: E402
+_lab = _json.loads((SC / "data" / "labels.json").read_text(encoding="utf-8"))
 for r in run.results:
-    others = [g for g in grouped if g != r.group]
+    gid = sm.gid_for_name(r.group, _lab)
+    own_lines = grouped.get(gid) or grouped.get(r.group) or []
+    others_lines = [ln for g, lines in grouped.items() if g != gid and g != r.group
+                    for ln in lines]
     body_all = r.path.read_text(encoding="utf-8")
-    only_own = all(o not in body_all for o in others)
-    check(f"「{r.group}」文件里不含其它群的原始记录", only_own, str(others))
+    only_own = all(ln not in body_all for ln in others_lines)
+    check(f"「{r.group}」文件里不含其它群的原始记录", only_own,
+          f"本群 {len(own_lines)} 行 / 其它群 {len(others_lines)} 行")
+    has_name = r.group != gid          # 没标定显示名时，名字本来就是 id，不算问题
+    check(f"「{r.group}」正文标题用的是显示名",
+          f"### {r.group}" in body_all and (not has_name or f"### {gid}" not in body_all),
+          f"gid={gid} 有显示名={has_name}")
 
 print("\n[4] 合并模式：1 次调用、1 个文件、含所有群")
 calls.clear()

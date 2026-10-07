@@ -184,6 +184,19 @@ def _kw_haystack(row) -> str:
     return "\n".join(parts).lower()
 
 
+def _summary_hint(gid: str, labels: dict | None = None) -> str:
+    """取某个群的"总结提示"（`labels.groups.<gid>.summary_hint`，用户在标定页填）。
+
+    用途：当日总结时把这段提示**一起提交给 LLM**，让它知道该怎么总结这个群、
+    哪些内容算噪音要剔除（例如"只关心报价与交期，忽略寒暄和表情包"）。
+    空/缺失返回空串；本函数只读内存里的 labels，不碰网络。
+    """
+    if labels is None:
+        labels = _load_labels()
+    ent = (labels.get("groups") or {}).get(gid) or {}
+    return str(ent.get("summary_hint") or "").strip()
+
+
 def _monitored_groups() -> set[str] | None:
     """config.yaml 的 `filter.groups`（= 总设置页里勾选的"监控的群"）。
 

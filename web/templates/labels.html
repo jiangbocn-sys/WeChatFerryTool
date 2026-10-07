@@ -214,6 +214,24 @@
                 </div>
             </div>
         </details>
+
+        {# —— 每群"总结提示"：随当日总结一起提交给 LLM，告诉它该怎么总结、什么算噪音 —— #}
+        {% set this_hint = hint_list[gi] if hint_list|length > gi else '' %}
+        <details style="margin:2px 0 10px 12px">
+            <summary style="cursor:pointer; font-size:12px; color:{{ '#8e44ad' if this_hint else '#7f8c8d' }}">
+                🧠 总结提示{% if this_hint %}（已设置 {{ this_hint|length }} 字）{% else %}（未设置）{% endif %}
+            </summary>
+            <div style="background:#f5eef8; border-radius:4px; padding:8px; margin-top:6px">
+                <textarea class="hint-ta" data-gi="{{ gi }}" rows="3"
+                          style="width:100%; font-size:12px"
+                          placeholder="例：这是风水学习群，只记录课程要点、作业与提问；忽略寒暄、表情、红包和闲聊">{{ this_hint }}</textarea>
+                <div class="muted" style="font-size:11px; margin-top:4px">
+                    这段话会**原样跟着本群的发言记录一起提交给大模型**，用来告诉它这个群该怎么总结、
+                    哪些内容算噪音要剔除。群主题差别大时特别有用（例如"只关心报价与交期，忽略闲聊"）。
+                    留空 = 不加提示（用通用总结规则）。
+                </div>
+            </div>
+        </details>
         {% endfor %}
     {% else %}
         <p class="empty">还没有标定</p>
@@ -324,13 +342,16 @@
 
         // 初始化两个数组字段（顺序与 group_key 一致，空也要提交，保证下标对齐）
         var keys = form.querySelectorAll('input[name="group_key"]');
-        form.querySelectorAll('input.js-group-focus, input.js-group-keywords').forEach(function (n) { n.remove(); });
+        form.querySelectorAll('input.js-group-focus, input.js-group-keywords, input.js-group-hints')
+            .forEach(function (n) { n.remove(); });
         keys.forEach(function (k) {
             var gi = Array.prototype.indexOf.call(keys, k);
             var ta = form.querySelector('.focus-ta[data-gi="' + gi + '"]');
             var kw = form.querySelector('.kw-ta[data-gi="' + gi + '"]');
+            var hint = form.querySelector('.hint-ta[data-gi="' + gi + '"]');
             addHidden('group_focus', ta ? ta.value : '');
             addHidden('group_keywords', kw ? kw.value : '');
+            addHidden('group_hints', hint ? hint.value : '');
         });
     });
 

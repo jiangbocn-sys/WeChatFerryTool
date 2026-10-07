@@ -52,6 +52,19 @@
   会补上当前用户的完全控制项并复检；备份/回退在 `D:\projects\.acl-recovery-20261007\`。
   修完 `dist` 之后**还要修 `build`**（同一条链上的两段），别以为修一个就够。
 
+* **每个群可以带一段"总结提示"一起提交给 LLM**（`labels.groups.<gid>.summary_hint`，10-07 新增）：
+  入口在「🏷 标定」页每个群下面的「🧠 总结提示」输入框（原样文本，按 group_key 数组对齐提交，
+  清空就删掉该键）。`summarize.build_prompt()` 会把它拼成 **第 7 条要求 + 「本群总结提示」清单**，
+  并明确"优先级高于通用要求、提示之外的内容算噪音直接丢掉"，用来剔除群里的闲聊杂质。
+  ⚠️ 两个容易踩的点：
+  1. `build_lines()` 的键**从"群显示名"改成了"群 id"**（因为提示按 id 存）——
+     渲染群名/文件名要走 `name_for_gid()`，否则 per_group 会生成
+     `summary-<日期>-<roomid>.md` 这种丑名字（10-07 被 `wft_pergroup_check` 逮到）。
+     `build_prompt()` 两种键都认（旧调用点传显示名会用 `gid_for_name()` 反查）。
+  2. prompt 组装用 **`str.replace` 而不是 `.format()`** —— 正文里含 `{}`（XML/JSON 片段）
+     会让 format 直接抛异常。
+  回归：`wft_summary_hint_check`（取值/注入/边界/兼容旧键/标定页保存与清空）。
+
 * **逐条 LLM 评分默认关闭（`llm.score_enabled: false`，10-07 用户决定）**：
   以前每条"别人发来的文本消息"都要调一次大模型打 1~5 分并写 `score/score_reason`。
   查过依赖面后确认它**只有一个真用途** —— 给 **Bark 推送**做阈值判断

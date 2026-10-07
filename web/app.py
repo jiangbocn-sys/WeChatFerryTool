@@ -1682,6 +1682,9 @@ def create_app() -> Flask:
             db_senders=sorted(db_senders),
             group_senders=group_senders,
             group_keys=list(labels.get("groups", {})),
+            # 每群"总结提示"（原样文本，不按关键词切分 —— 它是给 LLM 的口径说明）
+            hint_list=[str((labels.get("groups", {}).get(gk) or {}).get("summary_hint") or "")
+                       for gk in labels.get("groups", {})],
         )
 
     @app.route("/labels/save", methods=["POST"])
@@ -1727,6 +1730,7 @@ def create_app() -> Flask:
         group_keys = request.form.getlist("group_key")
         focus_lists = request.form.getlist("group_focus")
         keyword_lists = request.form.getlist("group_keywords")
+        hint_lists = request.form.getlist("group_hints")
         groups = labels["groups"]
         for i, gkey in enumerate(group_keys):
             if gkey not in groups:
@@ -1737,6 +1741,14 @@ def create_app() -> Flask:
                 entry["focus_members"] = members
             if i < len(keyword_lists):
                 entry["keywords"] = parse_keywords(keyword_lists[i])
+            if i < len(hint_lists):
+                # 总结提示是**给 LLM 的自然语言**：不切分、不 strip 内容（保留换行），
+                # 全空就删掉该键，避免 labels.json 里堆一串 summary_hint: ""
+                hint = str(hint_lists[i] or "").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+                if hint.strip():
+                    entry["summary_hint"] = hint
+                else:
+                    entry.pop("summary_hint", None)
 
         # 兼容旧版表单（focus_key[i] / focus[i] / focus_extra[i]）：没有新字段时才走这里
         if not group_keys:
