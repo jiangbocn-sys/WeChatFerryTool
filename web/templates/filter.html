@@ -25,7 +25,6 @@
 
 {% set grp = cfg.get('groups') or [] %}
 {% set snd = cfg.get('senders') or [] %}
-{% set kw  = cfg.get('keywords') or [] %}
 
 <div class="card" style="background:#eaf4ff">
     <h3 style="margin-top:0">📊 当前归档范围</h3>
@@ -33,12 +32,22 @@
         <div class="k">归档的群 / 会话</div>
         <div class="v">
             {% if grp %}
-                <strong>指定 {{ grp|length }} 个</strong>（见上方监控名单；群里没设重点人 = 整群归档）
+                <strong>指定 {{ grp|length }} 个</strong>（见上方监控名单；<b>整群对话都进归档</b>，
+                重点人只用 ★ 标记、不再把别人过滤掉 —— 这样模型才看得到上下文）
             {% else %}
                 <strong style="color:#27ae60">未指定</strong>（不按群归档）
             {% endif %}
         </div>
-        <div class="k">归档的人</div>
+        <div class="k">每群总结提示</div>
+        <div class="v">
+            {% set hinted = group_rows | selectattr('hint') | list %}
+            {% if hinted %}
+                <strong>{{ hinted|length }}</strong> 个群已设置（在上方监控名单表格里编辑）
+            {% else %}
+                <span class="muted">都还没设置</span>（在上方监控名单表格的 🧠 一栏填，然后点"保存总结提示"）
+            {% endif %}
+        </div>
+        <div class="k">归档的人（私聊）</div>
         <div class="v">
             {% if snd %}
                 <strong>指定 {{ snd|length }} 个</strong>（见上方监控名单）
@@ -54,16 +63,13 @@
 </div>
 
 <div class="card" style="border-left:4px solid #95a5a6">
-    <h3 style="margin-top:0">🔑 归档关键词（当前未生效）</h3>
-    <p class="hint" style="margin:0 0 8px">
-        这一项在 2026-10-07 的改动后<b>已不再参与任何判定</b>：入库不再看关键词，
-        归档也不看它。要"命中某词就进归档"，请到
-        <a href="{{ url_for('labels_page') }}">🏷 标定</a> 页设置<b>每群敏感关键词</b>。
+    <h3 style="margin-top:0">🔑 归档关键词（已废弃，不再参与判定）</h3>
+    <p class="hint" style="margin:0">
+        归档范围改成"监控名单里的群的<b>全部对话</b>"之后，全局归档关键词<b>已不参与任何判定</b>：
+        入库不看它、归档也不看它。<b>这里不再提供编辑入口</b>。
+        <br>如果你确实想"命中某词才进归档"，那属于另一套规则，请到
+        <a href="{{ url_for('labels_page') }}">🏷 标定</a> 页设置<b>每群敏感关键词</b>
+        （对所有群生效，可单独控制每个群）。
     </p>
-    {% if kw %}
-    <div class="hint" style="margin-bottom:8px">配置里现存 {{ kw|length }} 个（保留不删，避免动你的配置）：
-        <code>{{ kw|join('</code> <code>') }}</code></div>
-    {% endif %}
-    <a class="button secondary" href="{{ url_for('labels_page') }}">去标定页设置每群敏感关键词 →</a>
 </div>
 {% endblock %}

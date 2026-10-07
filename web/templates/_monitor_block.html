@@ -5,65 +5,101 @@
     <p class="hint" style="margin:0 0 10px">
         这里选中的群 / 人会写进 <code>filter.groups</code> / <code>filter.senders</code>，
         <b>只决定 23:30 归档与总结的范围</b>（不影响入库 —— 所有会话都会入库）：
-        <br>· 群在名单里、<b>没设重点关注人</b> → <b>整群归档 + 总结</b>
-        <br>· 群设了<b>重点关注人</b> → <b>只归档这些人的发言</b>（其他人不进归档）
+        <br>· 群在名单里 → <b>整群对话都进归档</b>（这样模型才看得到上下文：谁在问、别人怎么接）
+        <br>· 设了<b>重点关注人</b> → 这些人的发言在总结里会被打上 <b>★</b> 提示模型优先覆盖，
+        <b>但不会把其他人过滤掉</b>（10-07 起：上下文比"只看重点人"更重要）
         <br>另：群的<b>敏感关键词</b>命中、<b>全局重点联系人</b>的发言，也会进归档（在标定页设置）。
     </p>
 
     <h4 style="margin:12px 0 6px">监控的群（{{ group_rows|length }} 个）</h4>
+    <p class="hint" style="margin:0 0 8px">
+        <b>🧠 总结提示</b>：填了就会跟着该群的当日总结一起提交给大模型，用来告诉它这个群该怎么总结、
+        哪些内容算噪音要剔除（例如"只记录课程要点与作业，忽略闲聊和表情"）。
+        留空 = 不加提示（用通用规则）。改完点表格下方的<b>保存总结提示</b>。
+    </p>
     {% if group_rows %}
+    {# 总结提示单独一个表单包住整张表：HTML 不允许 form 嵌套，
+       而"移除该群"按钮自己是 form，所以那个按钮放表格外面的操作区。 #}
+    <form method="POST" action="{{ url_for('config_filter_save') }}">
+    <input type="hidden" name="action" value="save_hints">
     <table style="width:100%; font-size:13px; border-collapse:collapse">
         <tr style="text-align:left; color:#7f8c8d">
             <th style="padding:4px 6px">群</th>
             <th style="padding:4px 6px">归档范围</th>
             <th style="padding:4px 6px">重点关注的人</th>
-            <th style="padding:4px 6px">操作</th>
+            <th style="padding:4px 6px; min-width:260px">🧠 总结提示（提交给大模型）</th>
         </tr>
         {% for g in group_rows %}
         <tr style="border-top:1px solid #e8f0eb">
-            <td style="padding:6px">
+            <td style="padding:6px; vertical-align:top">
                 <b>{{ g.name }}</b>
                 {% if g.name != g.id %}<div class="hint" style="margin:0"><code style="font-size:11px">{{ g.id }}</code></div>{% endif %}
             </td>
-            <td style="padding:6px">
+            <td style="padding:6px; vertical-align:top">
                 {% if g.focus %}
-                    <span style="color:#e67e22">只归档 {{ g.focus|length }} 位重点关注人</span>
+                    <span style="color:#27ae60">整群归档</span>
+                    <span class="hint" style="display:block; margin:0">其中 {{ g.focus|length }} 位重点人
+                        在总结里打 <b>★</b>（不过滤其他人）</span>
                 {% else %}
                     <span style="color:#27ae60">整群归档</span>
                     {% if g.keywords %}<span class="hint" style="display:block; margin:0">另有 {{ g.keywords }} 个敏感关键词会命中</span>{% endif %}
                 {% endif %}
             </td>
-            <td style="padding:6px">
+            <td style="padding:6px; vertical-align:top">
                 {% if g.focus %}
                     {% for f in g.focus %}
                     <span style="display:inline-block; background:#eaf4ff; border-radius:10px; padding:2px 8px; margin:2px 4px 2px 0">
                         {{ f.name }}
-                        <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline"
-                              onsubmit="return confirm('把 {{ f.name }} 从重点关注人里移除？')">
-                            <input type="hidden" name="action" value="focus_remove">
-                            <input type="hidden" name="group" value="{{ g.id }}">
-                            <input type="hidden" name="sender" value="{{ f.id }}">
-                            <button type="submit" class="secondary" style="padding:0 5px; font-size:11px; border:none; background:none; color:#e74c3c; cursor:pointer">✕</button>
-                        </form>
+                        <button type="submit" form="rm-focus-{{ g.id }}-{{ loop.index }}" class="secondary"
+                                style="padding:0 5px; font-size:11px; border:none; background:none; color:#e74c3c; cursor:pointer">✕</button>
                     </span>
                     {% endfor %}
                 {% else %}
                     <span class="muted">未设置（整群归档）</span>
                 {% endif %}
             </td>
-            <td style="padding:6px; white-space:nowrap">
-                <a class="button secondary" style="padding:3px 10px; font-size:12px"
-                   href="{{ url_for('config_focus_page', gid=g.id) }}">👥 选择重点人</a>
-                <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline"
-                      onsubmit="return confirm('把该群移出监控名单？（归档里将不再包含它）')">
-                    <input type="hidden" name="action" value="remove_group">
-                    <input type="hidden" name="group" value="{{ g.id }}">
-                    <button type="submit" class="secondary" style="padding:3px 10px; font-size:12px">移除</button>
-                </form>
+            <td style="padding:6px; vertical-align:top">
+                <textarea name="hint_{{ g.id }}" rows="3" style="width:100%; font-size:12px"
+                          placeholder="例：本群是风水教学群，保留课程要点/卦例分析/作业答疑，剔除寒暄、表情与无关闲聊">{{ g.hint }}</textarea>
             </td>
         </tr>
         {% endfor %}
     </table>
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <button type="submit">💾 保存总结提示</button>
+        <span class="hint" style="margin:0">
+            保存后立刻生效（标定是热重载的）；想先看效果可去
+            <a href="{{ url_for('digest_page') }}">📝 归档/总结</a> 点"预览 prompt"（不花钱）。
+        </span>
+    </div>
+    </form>
+
+    {# 每群的操作按钮（移除重点人 / 移出监控名单）：这些必须是独立表单，放表格外面 #}
+    <div style="margin-top:10px">
+        <div class="hint" style="margin:0 0 4px">每群操作：</div>
+        {% for g in group_rows %}
+        <div style="display:flex; gap:8px; align-items:center; margin:3px 0; flex-wrap:wrap">
+            <b style="font-size:12px; min-width:180px">{{ g.name }}</b>
+            {% for f in g.focus %}
+            <form id="rm-focus-{{ g.id }}-{{ loop.index }}" method="POST" style="display:inline"
+                  action="{{ url_for('config_filter_save') }}"
+                  onsubmit="return confirm('把 {{ f.name }} 从重点关注人里移除？')">
+                <input type="hidden" name="action" value="focus_remove">
+                <input type="hidden" name="group" value="{{ g.id }}">
+                <input type="hidden" name="sender" value="{{ f.id }}">
+            </form>
+            {% endfor %}
+            <a class="button secondary" style="padding:3px 10px; font-size:12px"
+               href="{{ url_for('config_focus_page', gid=g.id) }}">👥 选择重点人</a>
+            <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline"
+                  onsubmit="return confirm('把该群移出监控名单？（归档里将不再包含它）')">
+                <input type="hidden" name="action" value="remove_group">
+                <input type="hidden" name="group" value="{{ g.id }}">
+                <button type="submit" class="secondary" style="padding:3px 10px; font-size:12px">移除该群</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
     {% else %}
     <p class="empty" style="margin:0">还没监控任何群 —— 用下面的下拉框添加（留空 = 所有会话都抓）</p>
     {% endif %}

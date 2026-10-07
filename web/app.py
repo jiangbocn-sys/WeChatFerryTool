@@ -315,6 +315,8 @@ def _config_context() -> dict:
             "important": bool(ent.get("important")),
             "keywords": len([k for k in (ent.get("keywords") or []) if str(k).strip()]),
             "focus": [{"id": m, "name": disp("senders", m)} for m in focus],
+            # 每群"总结提示"：跟着当日总结一起提交给 LLM（存在 labels.groups.<gid>.summary_hint）
+            "hint": str(ent.get("summary_hint") or ""),
         })
     sender_rows = [{"id": s, "name": disp("senders", s)} for s in mon_senders]
 
@@ -1016,7 +1018,11 @@ def create_app() -> Flask:
 
     @app.route("/config/focus/<gid>")
     def config_focus_page(gid: str):
-        """某个群的重点关注人选择页（勾选式）。一个都不勾 = 整群归档。"""
+        """某个群的重点关注人选择页（勾选式）。
+
+        ⚠️ 10-07 起语义变了：重点人**不再过滤归档范围**（监控名单里的群一律整群归档，
+        因为总结需要上下文），勾选的作用是"在总结里打 ★"。页面文案已同步。
+        """
         cfg = load_config()
         labels = load_labels()
         g = (labels.get("groups") or {}).get(gid) or {}
@@ -1056,17 +1062,19 @@ def create_app() -> Flask:
             gname=((g.get("name") or "").strip() or gid),
             focus=focus, senders=senders,
             n_keywords=len([k for k in (g.get("keywords") or []) if str(k).strip()]),
+            hint=str(g.get("summary_hint") or ""),
         )
 
     @app.route("/config/filter/save", methods=["POST"])
     def config_filter_save():
-        """监控名单的增删改（群 / 人 / 每个群的重点关注人）。
+        """监控名单的增删改（群 / 人 / 每个群的重点关注人 / 每群总结提示）。
 
         一次请求只做一件事（`action` 决定），避免大表单里改一处丢一处：
           add_group / remove_group        —— 监控的群
           add_sender / remove_sender      —— 监控的人
           set_focus                       —— 某个群的重点关注人（复选框全量替换）
           focus_add / focus_remove        —— 单个重点成员的增删
+          save_hints                      —— **每群总结提示**（按 `hint_<群id>` 字段全量提交）
         """
         cfg = load_config()
         filt = cfg.setdefault("filter", {})
@@ -1109,6 +1117,25 @@ def create_app() -> Flask:
             filt["senders"] = [x for x in _lst("senders") if x != sid]
             if sid in (labels.get("senders") or {}):
                 labels["senders"][sid]["monitored"] = False
+        elif action == "save_hints":
+            # 每群总结提示：字段名 hint_<群id>，一次提交所有监控群的提示。
+            # ⚠️ 只处理**监控名单里**的群，避免页面之外的字段被顺手写进来。
+            saved_n = 0
+            for gkey in _lst("groups"):
+                field = f"hint_{gkey}"
+                if field not in request.form:
+                    continue
+                raw = request.form.get(field) or ""
+                hint = raw.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+                ent = lab_groups.setdefault(gkey, {})
+                ent.setdefault("name", gkey)
+                if hint.strip():
+                    ent["summary_hint"] = hint
+                else:
+                    ent.pop("summary_hint", None)   # 清空 = 删掉该键，不留空串
+                saved_n += 1
+            if not saved_n:
+                err = "没有可保存的群（监控名单为空？）"
         elif action == "set_focus":
             picked = [x.strip() for x in request.form.getlist("focus") if x.strip()]
             if gid not in lab_groups:

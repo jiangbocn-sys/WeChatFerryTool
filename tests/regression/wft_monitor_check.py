@@ -32,7 +32,12 @@ FAILS = []
 
 
 def check(name, cond, extra=""):
-    print(("  PASS  " if cond else "  FAIL  ") + name + (f" | {extra}" if extra else ""))
+    line = ("  PASS  " if cond else "  FAIL  ") + name + (f" | {extra}" if extra else "")
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        # 测试名里可能有 emoji（如 🧠），GBK 控制台直接 print 会崩 —— 降级成转义再打
+        print(line.encode("ascii", "replace").decode("ascii"))
     if not cond:
         FAILS.append(name)
 
@@ -105,7 +110,13 @@ check("人下拉框存在", 'name="sender"' in b)
 check("下拉里带标定名字（幸福小家）", "幸福小家" in b)
 check("未标定的人**不**出现在下拉里（只列已标记的）", "wxid_eee555" not in
       __import__("re").search(r'value="add_sender".*?</form>', b, __import__("re").S).group(0))
-check("说明写了归档范围规则", "整群归档" in b and "只归档" in b)
+check("说明写了归档范围规则（只决定归档/总结范围，不影响入库）",
+      "只决定" in b and "归档与总结的范围" in b and "不影响入库" in b)
+# 总设置页不再内嵌监控表格（只留"当前监控的群/人 + 去监控规则页设置"入口卡片），
+# 这是刻意的"同一份配置只有一处能改"。
+_cfg_page = c.get("/config").get_data(as_text=True)
+check("总设置页给出去监控规则页的入口",
+      "去监控规则页设置" in _cfg_page and 'href="/filter"' in _cfg_page)
 
 print("\n[2] 添加监控群 → 写入 filter.groups + labels 打 monitored")
 r = c.post("/config/filter/save", data={"action": "add_group", "group": "958062774@chatroom"},
@@ -118,6 +129,14 @@ check("没设重点人（整群归档的前提）",
 r = c.post("/config/filter/save", data={"action": "add_group", "group": "958062774@chatroom"})
 check("重复添加被挡", "error=" in (r.headers.get("Location") or ""), str(r.headers.get("Location"))[:80])
 
+# 监控表格只在 /filter 渲染（/config 里那段是 {% if false %} 死代码，只留入口卡片）；
+# 10-07 起表格新增「🧠 总结提示」列 —— 必须等"群已进监控名单"之后再断言。
+_flt = c.get("/filter").get_data(as_text=True)
+check("监控规则页有每群总结提示输入框（10-07 起在此维护）",
+      'name="hint_958062774@chatroom"' in _flt and "保存总结提示" in _flt)
+check("监控规则页显示了 ★ 语义（重点人不再过滤他人）",
+      "整群对话都进归档" in _flt and "不会把其他人过滤掉" in _flt)
+
 print("\n[3] 添加监控人")
 c.post("/config/filter/save", data={"action": "add_sender", "sender": "wxid_bbb222"})
 check("filter.senders 已包含", "wxid_bbb222" in (cfg()["filter"]["senders"] or []))
@@ -129,7 +148,8 @@ b = r.get_data(as_text=True)
 check("GET 重点人页 -> 200", r.status_code == 200, str(r.status_code))
 check("列出了可选的人（老张）", "老张" in b)
 check("没排除自己（不显示群 id）", "958062774@chatroom" not in b.split("会话 ID")[0])
-check("当前提示为整群归档", "整群归档" in b)
+check("重点人页文案已更新（不再是'只归档这些人'）",
+      "不会" in b and "过滤掉" in b and "整群对话都进归档" in b)
 r = c.post("/config/filter/save", data={"action": "set_focus", "group": "958062774@chatroom",
                                         "focus": ["wxid_aaa111", "wxid_bbb222"]})
 check("保存重点人 -> 302", r.status_code == 302, str(r.status_code))
@@ -140,7 +160,8 @@ r = c.get("/config/focus/958062774@chatroom")
 check("再打开时勾选态回显", 'value="wxid_aaa111" checked' in r.get_data(as_text=True))
 r = c.get("/filter")
 b = r.get_data(as_text=True)
-check("总设置页显示只归档 2 位", "只归档 2 位重点关注人" in b, "")
+check("归档范围仍显示整群归档 + 2 位重点人打 ★",
+      "整群归档" in b and "2 位重点人" in b, "")
 
 print("\n[5] 归档规则真值表（_in_digest）")
 import consumer.digest as dg  # noqa: E402

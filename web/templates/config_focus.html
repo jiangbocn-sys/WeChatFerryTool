@@ -3,8 +3,10 @@
 <h2>选择重点关注的人 · {{ gname }}</h2>
 
 <p class="hint">
-    勾选后，<b>23:30 的归档与总结只包含这些人的发言</b>（其它人不会进归档）。
-    一个都不勾 = <b>整群归档</b>（该群所有消息，排除系统/撤回/表情等）。
+    ⚠️ <b>10-07 起：勾选重点人<u>不会</u>把其他人过滤掉</b> —— 该群在监控名单里就<b>整群对话都进归档</b>
+    （总结需要上下文：谁在问、别人怎么接）。
+    勾选的这些人会在总结里被打上 <b>★</b>，提示模型优先覆盖他们的发言。
+    <br>一个都不勾 = 不做 ★ 标记（归档范围不变，仍是整群）。
     <br>会话 ID：<code>{{ gid }}</code>
 </p>
 
@@ -48,9 +50,11 @@
     <b>当前规则</b>
     <div class="kv" style="margin-top:6px">
         <div class="k">重点关注人</div>
-        <div class="v">{% if focus %}{{ focus|length }} 位 —— 只归档这些人的发言{% else %}<b>未设置 → 整群归档</b>{% endif %}</div>
+        <div class="v">{% if focus %}{{ focus|length }} 位 —— 他们在总结里会打 <b>★</b>（归档仍是整群）{% else %}<b>未设置 → 不做 ★ 标记</b>{% endif %}</div>
         <div class="k">该群敏感关键词</div>
-        <div class="v">{{ n_keywords }} 个（在<a href="{{ url_for('labels_page') }}">标定页</a>设置，命中的消息也会进归档）</div>
+        <div class="v">{{ n_keywords }} 个（在<a href="{{ url_for('labels_page') }}">标定页</a>设置）</div>
+        <div class="k">🧠 总结提示</div>
+        <div class="v">{% if hint %}{{ hint|length }} 字（在<a href="{{ url_for('filter_page') }}">监控规则页</a>编辑）{% else %}未设置（在<a href="{{ url_for('filter_page') }}">监控规则页</a>填）{% endif %}</div>
     </div>
     <p class="hint" style="margin:10px 0 0">
         想验证效果：改完去 <a href="{{ url_for('digest_page') }}">📝 归档/总结</a> 页点「预览将发送的 prompt」，

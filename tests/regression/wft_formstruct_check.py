@@ -50,10 +50,12 @@ forms = re.findall(r"<form[^>]*>", html)
 print("   form 数:", len(forms))
 for f in forms:
     print("     ", f[:110])
-check("渲染出的 form 数量 = 监控区 3 + 归档范围表单 1 = 4", len(forms) == 4, str(len(forms)))
+check("渲染出的 form 数量 = 保存总结提示 1 + 监控区 4 = 5", len(forms) == 5, str(len(forms)))
 # 说明：/filter 页原来的「入库关键词」表单在 R-002（2026-10-07）被移除 ——
 # 关键词不再参与入库判定，页面改成"只维护归档范围 + 指向标定页的链接"，
 # 免得出现"看着能改、其实对入库没用"的误导。
+# 10-07 又新增 1 个表单：监控名单表格外层包了一个"保存每群总结提示"的 form
+#（表格里的"移除重点人/移出监控名单"按钮改放表格外面，避免 HTML form 嵌套）。
 check("没有 name=text（说明没渲染出旧 JSON 编辑器）", 'name="text"' not in html)
 
 # 关键：本页现在**只有监控区的 form**（入库关键词表单已在 R-002 移除），
