@@ -426,7 +426,15 @@ class Consumer:
                 time.sleep(1)
 
     def _reverse_conv_map(self) -> dict[str, str]:
-        """md5(会话) -> 会话 id（标定 + 数据库已知 id + 手工映射）。"""
+        """8 位 hash 前缀 -> 会话 id/名称（标定 + 数据库已知 id + 手工映射）。
+
+        键统一用**前 8 位**，因为语音文件名叫 `<hash>_<ms>.bin` 时 hash 段可能是
+        完整 32 位（VoiceTap 抓的）也可能是 8 位（老文件），调用方会先截前 8 位再查
+        （见 `_sweep_orphans`）。
+
+        手工映射 `voice.conv_overrides` 同时接受**完整 32 位**和**8 位前缀**两种键
+        —— 用户抄文件名时两种都可能，之前只认 32 位、抄 8 位就静默不生效（10-07 修）。
+        """
         ids: set[str] = set()
         ids |= set((self.labels.get("groups") or {}).keys())
         ids |= set((self.labels.get("senders") or {}).keys())
@@ -437,12 +445,27 @@ class Consumer:
             conn.close()
         except Exception:  # noqa: BLE001
             pass
-        m = {conv_hash(i): i for i in ids if i}
-        # 手工映射（config: voice.conv_overrides: {hash: 名称}）
+        m: dict[str, str] = {}
+        for i in ids:
+            if not i:
+                continue
+            h = conv_hash(i)
+            m.setdefault(h[:8], i)
+            m.setdefault(h, i)          # 完整 hash 也留一份，方便直接对照
+        # 手工映射（config: voice.conv_overrides: {hash 或前 8 位: 会话名/wxid}）
         overrides = (self.cfg.get("voice") or {}).get("conv_overrides") or {}
         for h, name in overrides.items():
-            m[str(h)] = str(name)
+            k = str(h).strip()
+            if not k:
+                continue
+            m.setdefault(k, str(name))          # 原样（32 位或 8 位都能直接命中）
+            m.setdefault(k[:8], str(name))      # 8 位前缀（32 位键也能被前缀查到）
         return m
+
+    @staticmethod
+    def _conv_key(h: str) -> str:
+        """文件名里的 hash 段 → 查表用的键（统一前 8 位）。"""
+        return (h or "").strip()[:8]
 
     def _sweep_orphans(self) -> None:
         """把孤儿语音解码+转写，落库为合成消息行（direction=out）。"""
@@ -458,7 +481,8 @@ class Consumer:
                 ts = int(ms) // 1000
             except ValueError:
                 h, ts = f.stem, int(time.time())
-            conv_id = rev.get(h)
+            key = self._conv_key(h)          # 统一按前 8 位查（兼容 32 位/8 位文件名）
+            conv_id = rev.get(key) or rev.get(h)
             try:
                 size = f.stat().st_size
             except OSError:
@@ -470,7 +494,7 @@ class Consumer:
             fake_id = f"vt-{f.stem}"
             inserted = self.store.insert_message(
                 msg_id=fake_id,
-                group_name=conv_id or f"(未知会话:{h[:8]})",
+                group_name=conv_id or f"(未知会话:{key})",
                 sender=self.self_wxid or "(self)",
                 sender_id="",
                 content="[语音]",
@@ -483,7 +507,7 @@ class Consumer:
                 self.store.update_transcript(fake_id, text)
             self.voice_tap.claim(f)
             log.info("孤儿语音归档: 会话=%s 文件=%d bytes 文字=%s",
-                     conv_id or h[:8], size, (text or "(未转写)")[:60])
+                     conv_id or key, size, (text or "(未转写)")[:60])
 
     def _capture_voice_bg(self, conv_id: str, msg_id: str) -> None:
         """后台线程：抓取语音文件 → silk 解码 → ASR 转写 → 落库。

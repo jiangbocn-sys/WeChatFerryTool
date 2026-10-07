@@ -28,6 +28,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\regression\run_all.p
 |---|---|
 | `wft_isolation_check` | **保存隔离性**：三个保存入口都"只动该动的"，改一处后其余配置段/labels 逐字段一致；截断提交整份拒绝 |
 | `wft_retention_check` | **消息库按期清理（R-001）**：阈值口径（保留 N 个自然日、当天永不删）、dry-run 报数=真删条数、0 天不删 / 1~6 天拒绝、一天最多一次、可中断、只有 `--vacuum` 才 VACUUM、静默（不调通知）、清理后各页面仍 200、CLI |
+| `wft_ingest_scope_check` | **抓取范围全开（R-002）**：名单外群/私聊照样入库、类型闸门仍有效、`_in_digest` 仍按监控名单筛选、入库日志不再有旧 `reason=`（真 Consumer + 假 hook 端到端） |
+| `wft_convmap_check` | **会话名手工映射**：`voice.conv_overrides` 的键同时认完整 32 位与 8 位前缀，且 8 位前缀在**实时孤儿语音归档**里真生效；填显示名只作标记（落成独立会话） |
 | `wft_monitor_check` | 监控名单增删 + 每群重点关注人 + 归档范围真值表（整群归档/只归档重点人/私聊只有★才进） |
 | `wft_pergroup_check` | **每群单独一份总结**（调用次数=群数、文件命名清洗与幂等、失败隔离、合并模式、Web 预览） |
 | `wft_offline_import_check` | 离线导入昵称/群成员（口令转义、备注优先、群成员解析、覆盖/不覆盖、`name_prev`、本群成员展示） |

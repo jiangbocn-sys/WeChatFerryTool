@@ -685,8 +685,12 @@ def create_app() -> Flask:
               "impact": "原始 silk 与解码后 wav 放哪里（相对数据根）",
               "suggest": "默认 data/voices"},
              {"path": "voice.conv_overrides", "label": "会话名手工映射", "kind": "overrides",
-              "impact": "把\"按会话 md5 命名的语音\"对应到具体会话名，便于事后辨认；写错只是显示名不对",
-              "suggest": "每行一个：md5=显示名"},
+              "impact": "微信把语音缓存放在 `cache\\<会话 md5>\\VoiceTemp\\` 里，**只给 md5、不给 wxid**，"
+                        "所以自己发出的语音（没有消息事件）会落成 `(未知会话:xxxxxxxx)`。"
+                        "这里把那串 md5 对应到具体会话：**填 wxid / roomid 才会归到真实会话**，"
+                        "填显示名只是做个标记（会变成独立会话名）",
+              "suggest": "每行一个：`md5=微信id`。md5 取语音文件名 `data\\voices\\raw\\<md5>_<时间>.bin` "
+                         "下划线前那段；**前 8 位或完整 32 位都认**（推荐填 wxid / roomid）"},
          ]},
         {"key": "asr", "title": "语音转写（ASR）", "fields": [
              {"path": "asr.enabled", "label": "启用语音转写", "kind": "bool",

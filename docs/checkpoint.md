@@ -68,6 +68,20 @@
   我在新回归里就打开过真库（进程里出现 4233 条），幸亏那是老副本。
   对策：**测试/脚本里一律用绝对路径**；想彻底修就改 Store 走"数据根优先"（未做，记在这）。
 
+* **语音「会话名手工映射」（`voice.conv_overrides`）的键同时认 32 位与 8 位前缀**（10-07 修）：
+  语音文件叫 `<会话md5>_<毫秒>.bin`，`_reverse_conv_map()` 现在**统一按前 8 位建键**
+  （完整 hash 也留一份），`_sweep_orphans()` 用 `_conv_key()` 截前 8 位再查 ——
+  以前实时路径只做精确匹配，用户只抄 8 位前缀时**静默不生效**，只有 `remap_convs.py`
+  认前缀，两边口径不一致。⚠️ 映射的**值**填 wxid/roomid 才会归到真实会话；
+  填显示名只会落成一个独立会话名（页面文案已写明）。回归：`wft_convmap_check`。
+
+* **排查用的现成脚本**（都在 `tools\`，只读/幂等，已在 git 里）：
+  `probe_wx_msg.py`（用 DLL 查微信自己的库，看某条消息在不在）、
+  `rehook_callback.py`（微信重启后重登记回调）、
+  `probe_wx_recent.py`（列各会话最近活跃时间）。
+  ⚠️ 它们依赖 DLL 的 QueryDB；10-07 实测本机 `GetAllDBName` 恒空（`get database handle…
+  failed`），所以"查微信库"这条路目前不可用，`probe_wx_recent.py` 会直接报这个。
+
 * **"消息抓不到"的标准排查顺序**（10-07 实测总结，别再靠猜）：
   1. `netstat -ano | findstr :30001`（hook 的 HTTP）、`:8888`（我们的回调）、`:6060`（Web）
      —— 看三个端口的属主 PID。冻结版 app 会同时持有 8888+6060，hook 挂在微信 PID 上。

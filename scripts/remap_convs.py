@@ -21,7 +21,11 @@ import yaml
 
 
 def build_map(conn: sqlite3.Connection) -> dict[str, str]:
-    """hash前8位 -> 会话 id/名称。"""
+    """hash 前 8 位 -> 会话 id/名称。
+
+    手工映射 `voice.conv_overrides` 的键**同时接受完整 32 位与 8 位前缀**
+    （2026-10-07：以前只截前 8 位用，填 8 位前缀的用户会被静默忽略）。
+    """
     ids: set[str] = set()
     ids |= {r[0] for r in conn.execute("SELECT DISTINCT group_name FROM messages")}
     ids |= {r[0] for r in conn.execute("SELECT DISTINCT sender FROM messages")}
@@ -34,7 +38,12 @@ def build_map(conn: sqlite3.Connection) -> dict[str, str]:
     m = {hashlib.md5(i.encode()).hexdigest()[:8]: i for i in ids if i}
     cfg = yaml.safe_load(open(PROJECT_DIR / "config.yaml", encoding="utf-8"))
     overrides = (cfg.get("voice") or {}).get("conv_overrides") or {}
-    m.update({str(h)[:8]: str(v) for h, v in overrides.items()})
+    for h, v in overrides.items():
+        k = str(h).strip()
+        if not k:
+            continue
+        m.setdefault(k[:8], str(v))      # 32 位或 8 位都归一到前 8 位
+        m.setdefault(k, str(v))          # 原样也留一份（对照用）
     return m
 
 
