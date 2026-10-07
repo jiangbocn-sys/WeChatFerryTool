@@ -109,6 +109,13 @@
       `{"ret":0,"retmsg":"success"}`（裸 XML 才回 `{"msg":"invalid..."}`），不产出任何图片字节；
       `/ForwardXMLMsg` 空 body 回 `{"ret":1,"retmsg":"fail"}`（且它会真发消息，不适合用来取图）
       → 见 `tools/probe_dll_image.py`。
+  * **AES 的密钥/IV 组合也全排除**（10-07 补充；`tools\probe_dat_decrypt.py` 可一键复跑全部否定项）：
+    ECB 换 key（XML.aeskey / 头部 0:16 / 16:32 / cdnthumburl 前 16 / md5(aeskey) /
+    sha256(aeskey)[:16]）× 偏移（0/15/16/31/32）、CBC 换 IV（头部前 16 / 全零 / cdnurl 前 16）、
+    以及"上述结果再 XOR 0x37/0xF9" → **全部 0 命中**。
+    ⚠️ 这类判定要用**严格魔数**（`FF D8 FF`/`89PNG`/`RIFF`…）；别用 `BM` ——
+    `0x07^0x45='B'` 能凑出 `BM` 造成假阳性（10-07 踩到一次，已修）。
+    AES 实现抽到 `tools\aes128.py`（纯 Python，过 FIPS-197 自检，零依赖可复用）。
   * **新线索（可能有用）**：`.dat` 的第 16~30 字节**在很多文件里完全相同**
     （`_t.dat` 200 个样本里只有 4 种取值，最常见的一串出现在 124 个文件里：
     `f2 aa 2d 4c fb 9c 93 5a 65 01 3e 5b cf c6 57`）→ 这一带不是"每文件随机的密文"，
