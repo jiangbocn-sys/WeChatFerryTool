@@ -88,17 +88,23 @@
     file_size/dir1/dir2`）与 `dir2id` 拼出完整路径
     `msg\attach\<会话md5>\<月>\Img\<stem>[_t|_h].dat`。
     现成脚本：`tools\probe_wx_resource.py`（只读快照 + 解密 + 按消息 id 反查）。
-  * **`.dat` 解密**（差最后一步）：微信 4.x 的 `.dat` = 自研容器（头 15 字节 `07 08 56 32 08 07 00 04
-    00 00 <len> 00 00 01 xx`）+ AES-128-ECB + **单字节 XOR**（公开实现
-    [chatlog/dat2img](https://pkg.go.dev/github.com/sjzar/chatlog@v0.0.11/pkg/util/dat2img)：
-    v4 = AES-ECB + XOR，XOR key 靠扫 `_t.dat` 反推，默认 0x37）。
-    10-07 实测：整文件单纯 AES 或单纯 XOR 都不出 JPEG；但用"JPEG 以 `FF D9` 结尾"这个判据
-    **反推出该图的 XOR key = 0xF9** → 格式可逆，只差把"哪一段被 XOR、AES 块边界"定死。
-    探针：`tools\probe_img_aes.py`（**纯 Python AES-128-ECB，已过 FIPS-197 自检**，可作零依赖兜底）
-    与 `tools\probe_img_aes2.py`（组合暴力试）。
-  * 已确认可用的判据：本地 `msg\video\*.jpg` 有 65 个**明文** JPEG，可当"已知明文"反推映射。
-  * 后续：新增 `GET /media/<msg_id>`（只读原库 + 解密 + 缓存 `data/media_cache/`），浏览页内联；
-    归档里图片目前是 `[图片 214×480 · 478 KB]`，接视觉模型描述是**另一个开关**（花 token）。
+  * **`.dat` 解密（10-07 穷尽式实测后的结论：不是简单方案，需要参考实现的密钥参数）**：
+    容器格式（181 个样本一致）：`07 08 56 32 08 07 00 04 00 00 <2字节小端长度> 00 00 01 <1字节变体>`
+    —— **前 15 字节固定**、第 16 字节随文件变化；`<2字节长度>` 实测等于该消息 XML 里的
+    `cdnthumblength`（_t 文件）与 `hevc_mid_size`（无后缀文件），可用来校验映射是否正确。
+    数据段 = 第 16 字节之后。已排除的假设（都是**全文件/全偏移**验证过的）：
+      ✗ 单字节 XOR（256 个 key × 各偏移，无任何魔数命中；尾部 key 0xF9 是"凑 FF D9"的假象）
+      ✗ zlib / gzip / zstd 直接解（原样与跳过 15/16 字节都试了）
+      ✗ AES-128-ECB + 消息 XML 的 `aeskey`（偏移 0/15/16/31/32 全试，头尾都不是任何图片魔数）
+      ✗ 明文（前 15 字节之后直接就是密文）
+    → 属于**真加密**（公开实现 chatlog/dat2img 说 v4 是 AES-ECB + XOR，但具体密钥派生/块边界
+    没拿到源码，`raw.githubusercontent.com` 在本会话取不到）。**这一步不要再用暴力试**，
+    要拿到参考实现的算法（或换一台能上 GitHub 的机器把 `dat2img.go` 抓下来）。
+  * 已就绪的判据（下次继续时直接用）：本地 `msg\video\*.jpg` 有 65 个**明文** JPEG 可当已知明文；
+    181 个 `.dat` 的头部逐字节统计见 `tools\probe_dat_struct4.py` 输出。
+  * 备选落地方案（都不依赖 `.dat`）：① 让用户手动把某张图另存/截图后上传；
+    ② 接视觉模型时由用户在微信里看图、把结论贴回来；③ 只做"元数据 + 提示用户去微信看"。
+  * **`GET /media/<msg_id>` 与浏览页内联图因此暂缓**（元数据与卡片已上线，见上一节）。
 
 * **语音「会话名手工映射」（`voice.conv_overrides`）的键同时认 32 位与 8 位前缀**（10-07 修）：
   语音文件叫 `<会话md5>_<毫秒>.bin`，`_reverse_conv_map()` 现在**统一按前 8 位建键**
