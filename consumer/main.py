@@ -517,21 +517,34 @@ class Consumer:
     def _capture_voice_bg(self, conv_id: str, msg_id: str) -> None:
         """后台线程：抓取语音文件 → silk 解码 → ASR 转写 → 落库。
 
-        优先用 VoiceTap 事件驱动捕获（毫秒级、覆盖收发双向）；
-        万一不可用，回退到老的 VoiceTemp 轮询。
+        三级兜底（2026-10-07 加强，原来只有前两级，实测漏抓 16/32）：
+          ① VoiceTap 事件捕获（毫秒级、覆盖收发双向）
+          ② 老的 VoiceTemp 轮询 `capture_voice()`
+          ③ **超时后直接扫 VoiceTemp 目录**（迟落盘/事件漏掉的场景，文件其实还在）
+        仍然失败时先落 `[未捕获到语音文件]`，再排一个**延迟重试** ——
+        有的语音要等你在微信里点一下播放、或微信过一会儿才落盘。
         """
         try:
             path = None
             raw_path = None
+            h = conv_hash(conv_id) if self.voice_tap is not None else ""
+            since = time.time() - 120
             if self.voice_tap is not None:
-                h = conv_hash(conv_id)
-                path = self.voice_tap.wait_for(h, since=time.time() - 120, timeout_s=20)
+                path = self.voice_tap.wait_for(h, since=since, timeout_s=20)
             if path is None:
                 path = capture_voice(self.wechat_dir, conv_id, msg_id, self.voice_dir)
+            if path is None and self.voice_tap is not None:
+                # ③ 扫盘补偿：事件没收到的、或迟落盘的，文件往往还在 VoiceTemp 里
+                p = self.voice_tap.scan_temp(h, since=since)
+                if p is not None:
+                    log.info("VoiceTap 事件没收到，扫盘找到: %s（会话 %s）", p.name, h[:12])
+                    path = self._adopt_temp(p, msg_id)
             if not path:
                 self.store.update_transcript(msg_id, "[未捕获到语音文件]")
+                log.warning("语音未捕获（三级兜底都没拿到），排延迟重试: conv=%s msg=%s",
+                            conv_id, msg_id)
+                self._schedule_voice_retry(conv_id, msg_id)
                 return
-            # 统一复制为 <msg_id>.bin（保持补转脚本的命名约定）
             if path.parent.name == "raw":
                 raw_path = path
                 dest_bin = self.voice_dir / f"{msg_id}{path.suffix or '.bin'}"
@@ -540,18 +553,75 @@ class Consumer:
             # 认领（孤儿处理器不再重复处理）
             if raw_path is not None and self.voice_tap is not None:
                 self.voice_tap.claim(raw_path)
-            wav = path.with_suffix(".wav")
-            if not decode_to_wav(path, wav):
-                self.store.update_transcript(msg_id, "[解码失败]")
-                return
-            text = self.asr.transcribe(wav)
-            if text:
-                self.store.update_transcript(msg_id, text)
-                log.info("语音转写成功 msg=%s: %s", msg_id, text[:60])
-            else:
-                self.store.update_transcript(msg_id, "[待转写]")
+            self._decode_and_transcribe(path, msg_id)
         except Exception:  # noqa: BLE001
             log.exception("语音捕获线程异常: conv=%s msg=%s", conv_id, msg_id)
+
+    def _adopt_temp(self, p: Path, msg_id: str) -> Path | None:
+        """把扫盘找到的 VoiceTemp 文件**复制出来**（微信随时可能删掉它），并**认领**它。
+
+        认领很重要：不认领的话，这个文件待会儿会被"孤儿语音"处理器当成自己发的语音
+        再处理一遍，导致**同一条语音入库两次**（10-07 已经观察到过重复）。
+        """
+        try:
+            dest = self.voice_dir / f"{msg_id}{p.suffix or '.bin'}"
+            shutil.copy2(p, dest)
+        except OSError as e:
+            log.warning("复制 %s 失败: %s", p.name, e)
+            return None
+        if self.voice_tap is not None:
+            try:
+                self.voice_tap.claim(p)          # 防止被孤儿处理器重复处理
+            except Exception:  # noqa: BLE001
+                log.debug("认领 %s 失败（不影响转写）", p.name, exc_info=True)
+        return dest
+
+    def _decode_and_transcribe(self, path: Path, msg_id: str) -> None:
+        """silk → wav → ASR → 落库（捕获路径与延迟重试共用）。"""
+        wav = path.with_suffix(".wav")
+        if not decode_to_wav(path, wav):
+            self.store.update_transcript(msg_id, "[解码失败]")
+            return
+        text = self.asr.transcribe(wav)
+        if text:
+            self.store.update_transcript(msg_id, text)
+            log.info("语音转写成功 msg=%s: %s", msg_id, text[:60])
+        else:
+            self.store.update_transcript(msg_id, "[待转写]")
+
+    def _schedule_voice_retry(self, conv_id: str, msg_id: str,
+                              delays: tuple[int, ...] = (60, 180, 600)) -> None:
+        """延迟重试若干次（默认 1/3/10 分钟后各一次）：扫盘 → 解码 → 转写 → 落库。
+
+        为什么需要：语音文件是**微信按需落盘**的 —— 你没点播放、或点得晚，
+        文件就不在 VoiceTemp 里；20 秒的窗口必然错过。重试期间若用户在微信里点了播放，
+        文件一出现就能补上。成功即停（避免无谓的重复解码）。
+        """
+
+        def worker() -> None:
+            h = conv_hash(conv_id) if self.voice_tap is not None else ""
+            for d in delays:
+                time.sleep(d)
+                if self.voice_tap is None or not h:
+                    return
+                try:
+                    row = self.store.get_transcript(msg_id) if hasattr(self.store, "get_transcript") else None
+                    if row and row not in ("[未捕获到语音文件]", ""):
+                        return                      # 已被别处补上了
+                    p = self.voice_tap.scan_temp(h, since=time.time() - 3600)
+                    if p is None:
+                        continue
+                    dest = self._adopt_temp(p, msg_id)
+                    if dest is None:
+                        continue
+                    log.info("延迟重试捞到语音 msg=%s <- %s", msg_id, p.name)
+                    self._decode_and_transcribe(dest, msg_id)
+                    return
+                except Exception:  # noqa: BLE001
+                    log.debug("语音延迟重试异常 msg=%s", msg_id, exc_info=True)
+
+        threading.Thread(target=worker, name=f"voice-retry-{msg_id[-6:]}", daemon=True).start()
+
 
     def _compute_priority(self, group_name: str, sender: str) -> tuple[int, str]:
         """返回 (priority, reason)。priority=1 表示命中重点关注。

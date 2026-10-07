@@ -131,6 +131,17 @@ class Store:
             )
             self._conn.commit()
 
+    def get_transcript(self, msg_id: str) -> str:
+        """读某条消息当前的 transcript（空/不存在返回空串）。
+
+        用途：语音**延迟重试**前先看一眼是不是已经被别处补上了，避免重复解码/重复调 ASR。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT transcript FROM messages WHERE msg_id = ?", (msg_id,)
+            ).fetchone()
+        return str(row[0] or "") if row else ""
+
     def mark_pushed(self, msg_id: str) -> None:
         with self._lock:
             self._conn.execute(

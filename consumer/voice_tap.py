@@ -31,6 +31,22 @@ def conv_hash(conv_id: str) -> str:
     return hashlib.md5(conv_id.encode("utf-8")).hexdigest()
 
 
+def _looks_like_voice_bin(name: str) -> bool:
+    """判断 VoiceTemp 里的一个文件名**像不像微信的语音文件**。
+
+    实测真实语音文件名形如 `1050_1791344098`（`<序号>_<秒级时间戳>`，**没有扩展名**，10~30 KB）。
+    同一目录里还会有**别的程序**留下的临时文件 —— 例如百度网盘同步的
+    `4_1791363695.baiduyun.uploading.cfg`（数字前缀一模一样，光看时间戳会误判）。
+    所以必须排除"带扩展名"的：微信语音不带扩展名。
+    """
+    if not name or name.startswith("."):
+        return False
+    if "." in name:                      # 有扩展名 → 不是微信语音（.cfg/.tmp/.dat… 都排掉）
+        return False
+    head, _, tail = name.partition("_")
+    return head.isdigit() and tail.isdigit() and len(tail) >= 9
+
+
 class _Handler(FileSystemEventHandler):
     def __init__(self, tap: "VoiceTap"):
         self.tap = tap
@@ -161,3 +177,59 @@ class VoiceTap:
                 return p
             time.sleep(0.2)
         return None
+
+    def scan_temp(self, h: str, since: float) -> Optional[Path]:
+        """**直接扫盘**：在 `<cache>/<月>/Message/<会话md5>/VoiceTemp/` 里找 mtime >= since 的文件。
+
+        为什么需要它（2026-10-07 实测）：`wait_for` 只认**事件已经捕获过**的文件，窗口 20 秒。
+        实际会遇到两种漏抓：
+          * 语音文件**迟落盘**（20 秒后才出现）—— 那时 `wait_for` 已经放弃了；
+          * watchdog 的事件**漏掉/来不及**（同一条语音的多个文件、目录刚被创建等）。
+        这两种情况下文件其实**还在 VoiceTemp 里**（实测事后来看还有未认领的文件），
+        所以超时后主动扫一遍目录能把它们捞回来。
+
+        返回最新匹配的文件；没有则 None。**不抢句柄、不认领** —— 由调用方决定（通常紧接着
+        调 `claim()`），保证与事件路径的行为一致。
+        """
+        if not h:
+            return None
+        found: list[tuple[float, Path]] = []
+        try:
+            months = [d for d in self.cache_dir.iterdir() if d.is_dir()]
+        except OSError:
+            return None
+        for month in months:
+            vd = month / "Message" / h / "VoiceTemp"
+            if not vd.is_dir():
+                continue
+            try:
+                for f in vd.iterdir():
+                    if not f.is_file() or not _looks_like_voice_bin(f.name):
+                        continue
+                    try:
+                        mt = f.stat().st_mtime
+                    except OSError:
+                        continue
+                    if mt >= since:
+                        found.append((mt, f))
+            except OSError:
+                continue
+        if not found:
+            return None
+        found.sort(key=lambda t: t[0])
+        return found[-1][1]
+
+    def _conv_hashes(self) -> set[str]:
+        """缓存里出现过的会话 md5（用于"这条语音是哪个会话"的兜底匹配）。"""
+        out: set[str] = set()
+        try:
+            for month in self.cache_dir.iterdir():
+                msgdir = month / "Message"
+                if not msgdir.is_dir():
+                    continue
+                for d in msgdir.iterdir():
+                    if (d / "VoiceTemp").is_dir():
+                        out.add(d.name)
+        except OSError:
+            pass
+        return out
