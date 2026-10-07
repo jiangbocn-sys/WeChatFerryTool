@@ -2280,6 +2280,35 @@ def create_app() -> Flask:
                           "date": "", "error": None, "result": None}
     summarize_lock = threading.Lock()
 
+    # 阶段总结（指定群 + 时间段）用**独立**的任务状态：
+    # 否则"当日总结"与"阶段总结"会互相把对方的 running 标志当占用，谁也跑不了。
+    range_job: dict = {"running": False, "started": 0.0, "finished": 0.0,
+                       "label": "", "error": None, "result": None}
+    range_lock = threading.Lock()
+
+    def _range_worker(gid: str, start: str, end: str, extra: str, note: str) -> None:
+        try:
+            import consumer.summarize as summarize_mod
+            res = summarize_mod.summarize_range(gid, start, end, extra,
+                                                out_dir=reports_dir())
+            with range_lock:
+                if not res.get("ok"):
+                    range_job["error"] = res.get("error") or "生成失败"
+                else:
+                    range_job["result"] = {
+                        "group": res["group"], "start": res["start"], "end": res["end"],
+                        "note": note, "total": res["total"], "days": res["days"],
+                        "name": res.get("name", ""), "path": res.get("path", ""),
+                        "chars": res["chars"], "content": res.get("content", ""),
+                    }
+        except Exception as e:  # noqa: BLE001
+            with range_lock:
+                range_job["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            with range_lock:
+                range_job["running"] = False
+                range_job["finished"] = time.time()
+
     def _summarize_worker(date_str: str) -> None:
         try:
             import consumer.summarize as summarize_mod
@@ -2459,6 +2488,94 @@ def create_app() -> Flask:
     @app.route("/api/digest/summarize/status")
     def api_digest_summarize_status():
         return jsonify(_summarize_status())
+
+    @app.route("/range-summary")
+    def range_summary_page():
+        """📆 阶段总结：指定**一个群 + 时间段**，交给 LLM 做阶段性归纳（10-07 新增）。"""
+        ctx = _config_context()
+        # 监控名单里的群排前面（那些才是日常在看的），其余按名字排
+        mon = set(ctx["mon_groups"])
+        all_g = sorted(ctx["all_groups"], key=lambda g: (g["id"] not in mon, g["name"]))
+        today = datetime.now().strftime("%Y-%m-%d")
+        monday = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+        rd = reports_dir()
+        past: list[dict] = []
+        if rd.is_dir():
+            for p in rd.iterdir():
+                # 阶段总结的文件名是 summary-<起>_<止>-<群>.md（两个日期 → 带下划线）
+                if p.is_file() and p.suffix.lower() == ".md" and \
+                        re.match(r"^summary-\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}-", p.name):
+                    past.append({"name": p.name,
+                                 "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                                 "size": p.stat().st_size})
+        past.sort(key=lambda r: r["mtime"], reverse=True)
+        with range_lock:
+            last = dict(range_job)
+        return render_template("range_summary.html",
+                               groups=all_g, mon_groups=ctx["mon_groups"],
+                               today=today, monday=monday, past=past[:20],
+                               last=last,
+                               llm=load_config().get("llm") or {})
+
+    def _range_args(data) -> tuple[str, str, str, str, str]:
+        """解析阶段总结的入参 → (gid, start, end, extra, note)；出错抛 ValueError。"""
+        import consumer.summarize as summarize_mod
+        gid = str(data.get("group") or "").strip()
+        if not gid:
+            raise ValueError("请选择一个群")
+        start, end, note = summarize_mod.resolve_range(str(data.get("range") or ""))
+        extra = str(data.get("extra") or "").strip()
+        if len(extra) > 4000:
+            raise ValueError("额外要求太长了（上限 4000 字）")
+        return gid, start, end, extra, note
+
+    @app.route("/api/range/preview", methods=["POST"])
+    def api_range_preview():
+        """本地拼 prompt（不联网、不花钱）：先看清楚要发什么、有多少条、多大。"""
+        data = request.get_json(silent=True) or request.form
+        try:
+            import consumer.summarize as summarize_mod
+            gid, start, end, extra, note = _range_args(data)
+            res = summarize_mod.summarize_range(gid, start, end, extra, dry_run=True)
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        if not res.get("ok"):
+            return jsonify({"ok": False, "error": res.get("error") or "拼装失败"}), 400
+        prompt = res["prompt"]
+        return jsonify({
+            "ok": True, "group": res["group"], "start": res["start"], "end": res["end"],
+            "note": note, "total": res["total"], "days": res["days"], "chars": res["chars"],
+            # 粗略提示：中文约 1.5 字/token；超过 ~12 万字符就该考虑缩短时间段
+            "warn": ("这条 prompt 较大（约 %d 千 token），模型可能截断或变慢，"
+                     "建议缩短时间段" % (res["chars"] // 1500)) if res["chars"] > 120000 else "",
+            "prompt": prompt,
+        })
+
+    @app.route("/api/range/generate", methods=["POST"])
+    def api_range_generate():
+        """真实调用 LLM 生成阶段总结（后台线程，避免 HTTP 超时）。"""
+        data = request.get_json(silent=True) or request.form
+        try:
+            gid, start, end, extra, note = _range_args(data)
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        with range_lock:
+            if range_job["running"]:
+                return jsonify({"ok": False, "error": "已经有一个阶段总结在跑，等它结束再点"}), 409
+            range_job.update({"running": True, "started": time.time(), "finished": 0.0,
+                              "label": f"{gid} {start}~{end}", "error": None, "result": None})
+        threading.Thread(target=_range_worker, args=(gid, start, end, extra, note),
+                         name="web-range-summary", daemon=True).start()
+        return jsonify({"ok": True, "start": start, "end": end, "note": note}), 202
+
+    @app.route("/api/range/status")
+    def api_range_status():
+        with range_lock:
+            st = dict(range_job)
+        st["seconds"] = round((st["finished"] or time.time()) - st["started"], 1) if st["started"] else 0
+        return jsonify(st)
 
     @app.route("/reports/<path:name>")
     def report_view(name: str):

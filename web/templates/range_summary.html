@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>📆 阶段总结（指定群 + 时间段）</h2>
+
+<div class="card" style="background:#eaf4ff">
+    <b>它做什么</b>：选一个群、填一个时间段（例如「周一~周三」或「2026-10-05 ~ 2026-10-07」），
+    把这几天的群聊记录交给大模型做**阶段性归纳**（不是单日流水账，而是跨天的脉络与结论）。
+    <br>和「📝 归档/总结」的区别：那边是**每天 23:30 自动**按监控名单跑；
+    这里是你**随时手动**指定任意群 + 任意时间段，还可以额外提要求。
+    <br><span class="muted">建议流程：先点「① 预览 prompt」（本地拼装、<b>不花钱</b>）确认选到了什么，
+    再点「② 生成总结」（会真实调用大模型）。</span>
+</div>
+
+<div class="card">
+    <form id="range-form">
+        <div style="display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end">
+            <label style="display:flex; flex-direction:column; gap:4px">
+                <span class="muted" style="font-size:12px">① 选择群 / 会话</span>
+                <select name="group" id="f-group" style="min-width:320px">
+                    <option value="">— 请选择 —</option>
+                    {% for g in groups %}
+                    <option value="{{ g.id }}">{{ g.name }}{% if g.name != g.id %}（{{ g.id }}）{% endif %}{% if g.id in mon_groups %} ★监控{% endif %}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label style="display:flex; flex-direction:column; gap:4px">
+                <span class="muted" style="font-size:12px">② 时间段</span>
+                <input type="text" name="range" id="f-range" value="周一~周三" style="min-width:240px">
+            </label>
+        </div>
+        <div class="muted" style="font-size:12px; margin-top:6px">
+            支持：<code>周一~周三</code>（= <b>本周</b>一~周三）、<code>星期一到星期五</code>、
+            <code>2026-10-05</code>、<code>2026-10-05 ~ 2026-10-07</code>、
+            <code>2026/10/5-2026/10/7</code>、<code>10-05~10-07</code>。今天 {{ today }}，
+            本周一 = {{ monday }}。
+        </div>
+
+        <div style="margin-top:14px">
+            <label class="muted" style="font-size:12px">③ 额外要求（可选，会作为独立一条要求提交给模型）</label>
+            <textarea name="extra" id="f-extra" rows="4" style="width:100%; font-size:13px"
+                      placeholder="例：&#10;按「事件线」梳理，不要逐条罗列；&#10;重点提取：金额、时间、决定、待办与负责人；&#10;最后给一个 5 条以内的结论清单；&#10;忽略寒暄与表情，转写错误按上下文纠正。"></textarea>
+            <div class="muted" style="font-size:12px; margin-top:4px">
+                留空 = 只用通用规则（含该群的「🧠 总结提示」）。这里适合写**本次任务特有的**要求；
+                长期不变的口径写在
+                <a href="{{ url_for('filter_page') }}">🎯 监控规则</a> 页的每群总结提示里。
+            </div>
+        </div>
+
+        <div style="margin-top:16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+            <button type="button" class="secondary" id="btn-preview">① 预览 prompt（不花钱）</button>
+            <button type="button" id="btn-generate">② 生成总结（调用大模型）</button>
+            <span id="status" class="muted" style="font-size:12px"></span>
+        </div>
+    </form>
+</div>
+
+<div class="card" id="preview-card" style="display:none">
+    <h3 style="margin-top:0">📋 本次将提交给模型的内容</h3>
+    <div id="preview-meta" class="kv"></div>
+    <div id="preview-warn" style="display:none; background:#fff8e1; border-left:4px solid #e67e22; padding:8px; margin:8px 0"></div>
+    <details style="margin-top:8px">
+        <summary style="cursor:pointer">展开完整 prompt</summary>
+        <pre id="preview-text" style="white-space:pre-wrap; font-size:12px; background:#f8f9fa; padding:10px; border-radius:4px; max-height:520px; overflow:auto"></pre>
+    </details>
+</div>
+
+<div class="card" id="result-card" style="{% if not (last and last.result) %}display:none{% endif %}">
+    <h3 style="margin-top:0">✅ 生成结果 <span class="muted" style="font-size:12px">（直接显示在页面上，无需打开文件）</span></h3>
+    <div id="result-meta" class="kv">
+        {% if last and last.result %}
+        {% set r = last.result %}
+        <div class="k">群</div><div class="v">{{ r.group }}</div>
+        <div class="k">时间段</div><div class="v">{{ r.note or (r.start ~ ' ~ ' ~ r.end) }}</div>
+        <div class="k">用了</div><div class="v">{{ r.total }} 条 / {{ (r.days or [])|length }} 天</div>
+        <div class="k">文件</div><div class="v"><a href="{{ url_for('report_view', name=r.name) }}">{{ r.name }}</a>（也可下载留档）</div>
+        {% endif %}
+    </div>
+    <div id="result-text" style="font-size:13px; background:#f4fbf7; padding:12px; border-radius:4px;
+         white-space:pre-wrap; line-height:1.75; margin-top:8px">{% if last and last.result %}{{ last.result.content }}{% endif %}</div>
+</div>
+
+{% if past %}
+<div class="card">
+    <h3 style="margin-top:0">📂 以前的阶段总结</h3>
+    <table style="width:100%; font-size:13px; border-collapse:collapse">
+        <tr style="text-align:left; color:#7f8c8d">
+            <th style="padding:4px 6px">文件</th><th style="padding:4px 6px">大小</th><th style="padding:4px 6px">生成时间</th>
+        </tr>
+        {% for r in past %}
+        <tr style="border-top:1px solid #e8f0eb">
+            <td style="padding:4px 6px"><a href="{{ url_for('report_view', name=r.name) }}">{{ r.name }}</a></td>
+            <td style="padding:4px 6px">{{ (r.size / 1024)|round(1) }} KB</td>
+            <td style="padding:4px 6px">{{ r.mtime }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+<script>
+(function () {
+    var form = document.getElementById('range-form');
+    var st = document.getElementById('status');
+    var poll = null;
+
+    function payload() {
+        return {
+            group: form.querySelector('#f-group').value,
+            range: form.querySelector('#f-range').value,
+            extra: form.querySelector('#f-extra').value
+        };
+    }
+    function setStatus(t, color) {
+        st.textContent = t || '';
+        st.style.color = color || '#7f8c8d';
+    }
+    function kv(el, pairs) {
+        el.innerHTML = pairs.map(function (p) {
+            return '<div class="k">' + p[0] + '</div><div class="v">' + p[1] + '</div>';
+        }).join('');
+    }
+    function esc(s) { return String(s).replace(/[&<>]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+
+    document.getElementById('btn-preview').addEventListener('click', function () {
+        setStatus('正在本地拼装…');
+        fetch('{{ url_for("api_range_preview") }}', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload())
+        }).then(function (r) { return r.json(); }).then(function (j) {
+            if (!j.ok) { setStatus('❌ ' + j.error, '#e74c3c'); return; }
+            setStatus('✅ 已拼装（未调用模型）', '#27ae60');
+            document.getElementById('preview-card').style.display = '';
+            kv(document.getElementById('preview-meta'), [
+                ['群', j.group], ['时间段', j.note || (j.start + ' ~ ' + j.end)],
+                ['归档条数', j.total + ' 条'], ['覆盖天数', (j.days || []).length + ' 天'],
+                ['prompt 大小', j.chars + ' 字']
+            ]);
+            var w = document.getElementById('preview-warn');
+            if (j.warn) { w.style.display = ''; w.textContent = '⚠️ ' + j.warn; } else { w.style.display = 'none'; }
+            document.getElementById('preview-text').textContent = j.prompt;
+        }).catch(function (e) { setStatus('❌ ' + e, '#e74c3c'); });
+    });
+
+    document.getElementById('btn-generate').addEventListener('click', function () {
+        if (!payload().group) { setStatus('❌ 请先选择群', '#e74c3c'); return; }
+        if (!confirm('确定调用大模型生成阶段总结？（会消耗额度）')) return;
+        setStatus('正在提交…');
+        fetch('{{ url_for("api_range_generate") }}', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload())
+        }).then(function (r) { return r.json().then(function (j) { return [r.status, j]; }); })
+          .then(function (pair) {
+            var code = pair[0], j = pair[1];
+            if (!j.ok) { setStatus('❌ ' + j.error, '#e74c3c'); return; }
+            setStatus('⏳ 模型正在生成…（' + (j.note || '') + '）');
+            if (poll) clearInterval(poll);
+            poll = setInterval(check, 1500);
+        }).catch(function (e) { setStatus('❌ ' + e, '#e74c3c'); });
+    });
+
+    function check() {
+        fetch('{{ url_for("api_range_status") }}').then(function (r) { return r.json(); })
+          .then(function (st2) {
+            if (st2.running) { setStatus('⏳ 生成中… ' + st2.seconds + 's'); return; }
+            clearInterval(poll); poll = null;
+            if (st2.error) { setStatus('❌ ' + st2.error, '#e74c3c'); return; }
+            var res = st2.result || {};
+            setStatus('✅ 完成（' + st2.seconds + 's）', '#27ae60');
+            document.getElementById('result-card').style.display = '';
+            kv(document.getElementById('result-meta'), [
+                ['群', res.group], ['时间段', res.note || (res.start + ' ~ ' + res.end)],
+                ['用了', res.total + ' 条 / ' + (res.days || []).length + ' 天'],
+                ['文件', '<a href="/reports/' + encodeURIComponent(res.name) + '">' + esc(res.name) + '</a>']
+            ]);
+            document.getElementById('result-text').textContent = res.content || '';
+        }).catch(function (e) { setStatus('❌ ' + e, '#e74c3c'); });
+    }
+})();
+</script>
+{% endblock %}

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field
@@ -224,6 +225,264 @@ def name_for_gid(gid: str, labels: dict | None = None) -> str:
         if nm:
             return nm
     return gid
+
+
+# ---------------------------------------------------------------------------
+# 阶段（跨天，指定会话）总结 —— 2026-10-07 新增
+# ---------------------------------------------------------------------------
+def fmt_range(start: str, end: str) -> str:
+    """把起止日期显示成人看的样子：同日 → `2026-10-07`；跨天 → `2026-10-05 ~ 2026-10-07`。"""
+    return start if start == end else f"{start} ~ {end}"
+
+
+def collect_group_range(gid: str, start: str, end: str,
+                        db_path: Path | None = None) -> tuple[list[str], dict] | None:
+    """取**指定会话**在 [start, end]（含两端整天）内的消息，渲染成归档那种行。
+
+    与每日总结的区别（刻意如此）：
+      * **只按会话取**（用户明确指定了一个群），不像 `_in_digest` 那样按监控名单/重点人过滤 ——
+        阶段复盘往往就是想看"这个群这几天到底聊了什么"，包括"路人"的话。
+      * 时间范围是**日期闭区间**（含 end 那天整天），不是单日。
+      * 仍然套用类型闸门 `digest.exclude_types`（表情/系统/图片等噪音先挡掉）与 ★ 标记。
+
+    返回 `([行, ...], {"count": n, "start": int_ts, "end": int_ts, "days": [...]})`；
+    数据库不存在返回 None。
+    """
+    day0 = datetime.strptime(start, "%Y-%m-%d")
+    day1 = datetime.strptime(end, "%Y-%m-%d")
+    if day1 < day0:
+        day0, day1 = day1, day0
+    lo = int(day0.timestamp())
+    hi = int((day1 + timedelta(days=1)).timestamp())      # 含 end 当天整天
+
+    db_file = db_path or (PROJECT_DIR / "data" / "messages.db")
+    if not db_file.is_file():
+        return None
+    labels = _load_labels(LABELS_PATH)
+    exclude = _exclude_types()
+
+    conn = sqlite3.connect(f"file:{db_file.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """SELECT group_name, sender, content, msg_type, received_at, transcript
+               FROM messages
+               WHERE group_name = ? AND received_at >= ? AND received_at < ?
+               ORDER BY received_at""",
+            (gid, lo, hi),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    lines: list[str] = []
+    days: set[str] = set()
+    for r in rows:
+        if int(r["msg_type"] or 0) in exclude:
+            continue
+        ts = int(r["received_at"] or 0)
+        if not ts:
+            continue
+        dt = datetime.fromtimestamp(ts)
+        # 跨天时把日期也带上，模型才能区分"周一的讨论"和"周三的结论"
+        stamp = dt.strftime("%m-%d %H:%M") if start != end else dt.strftime("%H:%M")
+        days.add(dt.strftime("%Y-%m-%d"))
+        skey = r["sender"] or "?"
+        sname = ((labels.get("senders") or {}).get(skey) or {}).get("name") or skey
+        star = "★" if _is_star(r, labels) else ""
+        body = _render_content(r).replace("\n", " ").strip()
+        lines.append(f"[{stamp}]{star}{sname}（{_type_label(int(r['msg_type'] or 0))}）：{body}")
+
+    meta = {"count": len(lines), "start": start, "end": end, "days": sorted(days)}
+    return lines, meta
+
+
+def resolve_range(text: str) -> tuple[str, str, str]:
+    """把用户填的时间段解析成 `(start, end, 说明)`。
+
+    支持（大小写/空格随意）：
+      * 具体日期：`2026-10-05`（单个日期 = 那一天）
+      * 区间：`2026-10-05 ~ 2026-10-07`、`2026-10-05 到 2026-10-07`、
+        `2026/10/5-2026/10/7`、`2026-10-05,2026-10-07`
+      * 星期：`周一~周三`（= **本周**一 → 周三）、`星期一到星期五`、
+        `周一`（只有起点的星期 = 那天单日；`周一~周三` 这种两个星期都认）
+    解析失败抛 `ValueError`，由调用方显示成人话。
+
+    返回 `(start, end, 人看的说明)`，说明里会写清"星期几实际落到了哪几个日期"，
+    避免用户以为选了周一~周三、实际却是上周。
+    """
+    s = (text or "").strip().replace("～", "~").replace("—", "-").replace("－", "-")
+    if not s:
+        raise ValueError("请填写时间段")
+    plain = s.replace(" ", "")
+    today = datetime.now().date()
+
+    def _wk(tok: str) -> int | None:
+        """周一=0 … 周日=6；认不出返回 None。"""
+        t = tok.strip()
+        for i, names in enumerate((("周一", "星期一", "礼拜一", "周1", "星期1"),
+                                   ("周二", "星期二", "礼拜二", "周2", "星期2"),
+                                   ("周三", "星期三", "礼拜三", "周3", "星期3"),
+                                   ("周四", "星期四", "礼拜四", "周4", "星期4"),
+                                   ("周五", "星期五", "礼拜五", "周5", "星期5"),
+                                   ("周六", "星期六", "礼拜六", "周6", "星期6"),
+                                   ("周日", "周天", "星期日", "星期天", "礼拜日", "礼拜天", "周7", "星期7"))):
+            if t in names:
+                return i
+        return None
+
+    def _date(tok: str) -> str | None:
+        t = (tok or "").strip().replace("/", "-").replace(".", "-")
+        for fmt in ("%Y-%m-%d", "%y-%m-%d", "%m-%d"):
+            try:
+                d = datetime.strptime(t, fmt)
+            except ValueError:
+                continue
+            if fmt == "%m-%d":                      # 没写年份 → 补当年
+                d = d.replace(year=today.year)
+            return d.strftime("%Y-%m-%d")
+        return None
+
+    # ① 具体日期（单个或区间）。⚠️ **不能把单个 `-` 当分隔符**，
+    #    否则 `2026-10-05` 会被拆成 2026 / 10 / 05 三段，日期解析全废。
+    # 具体日期（单个或区间）。⚠️ 关键难点：`-` 既是**日期内部**分隔符又是**区间**分隔符
+    #（`2026-10-05-2026-10-07` 这种混用写法必须能切开），所以顺序是：
+    #   ① 先在"日期与日期之间"的 `-` 上插入 `~`（用前瞻/后顾判断两侧都是日期）
+    #   ② 再把 `/`、`.` 分隔的日期归一成 `-`
+    #   ③ 最后按 `~`/逗号/顿号/到/至/空白 切分
+    # 踩过：先归一（`2026/10/5` → `2026-10-5`）会得到无法切分的 `2026-10-5-2026-10-7`。
+    spaced = re.sub(r"(?<=\d)\s*-\s*(?=\d{4}[-/.]\d)", "~", plain)
+    spaced = re.sub(r"(?<=\d)\s*-\s*(?=\d{1,2}[-/.]\d)", "~", spaced)
+    norm = re.sub(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", r"\1-\2-\3", spaced)
+    norm = re.sub(r"(?<![\d-])(\d{1,2})[-/.](\d{1,2})(?![\d-])", r"\1-\2", norm)
+    date_toks = [p for p in re.split(r"[~,，、]|到|至|\s+", norm) if p]
+    dates = [d for d in (_date(p) for p in date_toks) if d]
+    if dates:
+        # `2026-10-05 ~ 10-07`：第二个只写了月-日 → 沿用起始年份
+        year = dates[0][:4]
+        dates = [(year + d[4:]) if len(d) == 5 else d for d in dates]
+        start, end = min(dates), max(dates)
+        note = f"{fmt_range(start, end)}（共 {_date_span(start, end)} 天）"
+        return start, end, note
+
+    # ② 星期：`周一~周三` / `星期一到星期五`（同样不按 `-` 拆，否则"星期一"会被拆碎）
+    parts = [p for p in re.split(r"[~,，、]|到|至|\s+", plain) if p]
+    wks = [_wk(p) for p in parts]
+    wks = [w for w in wks if w is not None]
+    if wks:
+        monday = today - timedelta(days=today.weekday())     # 本周一
+        start_d, end_d = monday + timedelta(days=wks[0]), monday + timedelta(days=wks[-1])
+        if end_d < start_d:                                   # 例：周五~周一 → 跨周
+            end_d += timedelta(days=7)
+        start, end = start_d.strftime("%Y-%m-%d"), end_d.strftime("%Y-%m-%d")
+        note = (f"本周 {parts[0]} ~ {parts[-1]} → 实际 {fmt_range(start, end)}"
+                f"（共 {_date_span(start, end)} 天）")
+        return start, end, note
+
+    raise ValueError(f"看不懂这个时间段：{text!r}。可填 `2026-10-05`、`2026-10-05 ~ 2026-10-07` "
+                     f"或 `周一~周三`")
+
+
+def _date_span(start: str, end: str) -> int:
+    a = datetime.strptime(start, "%Y-%m-%d").date()
+    b = datetime.strptime(end, "%Y-%m-%d").date()
+    return (b - a).days + 1
+
+
+def build_range_prompt(gid: str, lines: list[str], start: str, end: str,
+                       extra_requirement: str = "", labels: dict | None = None) -> str:
+    """阶段总结的 prompt：同一套规则模板，但标题是"<起> ~ <止>"，并可**追加用户的具体要求**。
+
+    `extra_requirement` 会作为**第 10 条**插在通用规则之后、每群总结提示之前 ——
+    它是"这次任务额外要什么"（例如"按事件线梳理""只统计金额与决定""输出表格"），
+    优先级低于每群总结提示（后者是该群的长期口径）。
+    """
+    if labels is None:
+        labels = _load_labels(LABELS_PATH)
+    gname = name_for_gid(gid, labels)
+    day_label = fmt_range(start, end)
+
+    body = "\n".join([f"### 群：{gname}（{len(lines)} 条）", *lines])
+    hint = _summary_hint(gid, labels)
+    hints_block = _hints_block([(gname, hint)]) if hint else ""
+
+    extra = ""
+    req = (extra_requirement or "").strip()
+    if req:
+        extra = ("10. **本次任务的额外要求（用户本次指定，必须满足）**：\n"
+                 + "\n".join("    " + ln for ln in req.splitlines() if ln.strip()) + "\n")
+
+    out = (PROMPT_TEMPLATE
+           .replace("下面是「{date}」的群聊发言记录", f"下面是「{day_label}」的群聊发言记录")
+           .replace("{date}", day_label)
+           .replace("{extra_rules}", hints_block + extra)
+           .replace("{body}", body.strip()))
+    return out
+
+
+def summarize_range(gid: str, start: str, end: str, extra_requirement: str = "",
+                    out_dir: Path | None = None, dry_run: bool = False,
+                    db_path: Path | None = None) -> dict:
+    """阶段总结主入口（Web 与 CLI 共用）。
+
+    `dry_run=True` 只拼 prompt、不联网（返回 prompt 与统计），便于"先看再花钱"。
+    返回 dict：`{"ok", "prompt", "content", "path", "total", "days", "chars", "error"}`。
+    """
+    labels = _load_labels(LABELS_PATH)
+    got = collect_group_range(gid, start, end, db_path=db_path)
+    if got is None:
+        return {"ok": False, "error": f"找不到数据库 {db_path or (PROJECT_DIR / 'data' / 'messages.db')}"}
+    lines, meta = got
+    prompt = build_range_prompt(gid, lines, start, end, extra_requirement, labels)
+    result = {"ok": True, "prompt": prompt, "chars": len(prompt),
+              "total": meta["count"], "days": meta["days"],
+              "group": name_for_gid(gid, labels), "start": start, "end": end,
+              "content": "", "path": ""}
+    if dry_run:
+        return result
+    if not lines:
+        result["ok"] = False
+        result["error"] = (f"{name_for_gid(gid, labels)} 在 {fmt_range(start, end)} "
+                           f"没有可总结的消息（检查时间段，或该群这几天没消息）")
+        return result
+
+    llm_cfg = _llm_cfg()
+    try:
+        content = strip_think(call_llm(prompt, llm_cfg))
+    except Exception as e:  # noqa: BLE001
+        result["ok"] = False
+        result["error"] = f"{type(e).__name__}: {e}"
+        return result
+    if not content:
+        result["ok"] = False
+        result["error"] = "LLM 返回了空内容（模型只输出了推理过程？）"
+        return result
+
+    out = out_dir or (PROJECT_DIR / "reports")
+    out.mkdir(parents=True, exist_ok=True)
+    tag = start if start == end else f"{start}_{end}"
+    fname = f"summary-{tag}-{safe_name(name_for_gid(gid, labels), fallback='group')}.md"
+    path = out / fname
+    head = [
+        f"# 阶段群聊总结 · {fmt_range(start, end)} · {name_for_gid(gid, labels)}",
+        "",
+        f"> 会话：**{name_for_gid(gid, labels)}**（{meta['count']} 条，覆盖 "
+        f"{len(meta['days'])} 天：{'、'.join(meta['days'])}）",
+        f"> 由大模型归纳生成；模型：{llm_cfg.get('model') or '?'} @ {llm_cfg.get('base_url') or '?'}",
+    ]
+    if (extra_requirement or "").strip():
+        head.append(f"> 额外要求：{(extra_requirement or '').strip()}")
+    hint = _summary_hint(gid, labels)
+    if hint:
+        head.append(f"> 本群总结提示：{hint}")
+    head += ["", content, "", "---", "", "## 附：提交给模型的原始记录", ""]
+    head += [f"### {name_for_gid(gid, labels)}"] + lines
+    path.write_text("\n".join(head) + "\n", encoding="utf-8")
+
+    result["content"] = content
+    result["path"] = str(path)
+    result["name"] = path.name
+    return result
+
 
 
 def build_prompt(date_str: str, grouped: dict[str, list[str]],

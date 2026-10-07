@@ -32,7 +32,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\regression\run_all.p
 | `wft_convmap_check` | **会话名手工映射**：`voice.conv_overrides` 的键同时认完整 32 位与 8 位前缀，且 8 位前缀在**实时孤儿语音归档**里真生效；填显示名只作标记（落成独立会话） |
 | `wft_cards_check` | **消息卡片解析与渲染**（`consumer/cards.py`）：图片带尺寸/大小、引用回复带被引用人+原话（含嵌套引用再解析一层）、链接带标题/描述、文件/位置/名片/通话/撤回；归档摘要与浏览页**都不再吐原始 XML**（真库校验：4415 条 0 报错） |
 | `wft_summary_hint_check` | **每群总结提示**：`labels.groups.<gid>.summary_hint` 随当日总结一起提交给 LLM（含第 7 条优先级规则）；`build_lines()` 的键是群 id、文件名/标题仍用显示名；无提示时规则不出现；正文含 `{}` 不炸；标定页可存/可清空且不破坏其它字段 |
-| `wft_monitor_check` | 监控名单增删 + 每群重点关注人 + 归档范围真值表（整群归档/只归档重点人/私聊只有★才进） |
+| `wft_monitor_check` | 监控名单增删 + 每群重点关注人 + 归档范围真值表（整群归档 + 重点人打 ★ / 私聊只有★才进）+ 监控规则页的每群总结提示入口 |
+| `wft_range_summary_check` | **📆 阶段总结**：时间段解析（具体日期/区间/斜杠点/`周一~周三`/跨周/坏输入）、按会话取数 + 类型闸门 + ★、用户额外要求注入 prompt 的位置、dry_run 不调 LLM、落盘命名 `summary-<起>_<止>-<群>.md`、Web 三接口、**结果页内直接显示**且刷新存活、与当日总结互不干扰 |
 | `wft_pergroup_check` | **每群单独一份总结**（调用次数=群数、文件命名清洗与幂等、失败隔离、合并模式、Web 预览） |
 | `wft_offline_import_check` | 离线导入昵称/群成员（口令转义、备注优先、群成员解析、覆盖/不覆盖、`name_prev`、本群成员展示） |
 | `wft_inject_guard_check` | keyhook 注入安全闸门（默认关闭、版本不符拒绝、`--inject-keys` 才开） |
