@@ -1,4 +1,8 @@
-"""冒烟：/filter 现在是「监控规则」页（监控名单 + 入库关键词），/config 只留链接。"""
+"""冒烟：/filter 现在是「监控规则（归档范围）」页，/config 只留链接。
+
+R-002（2026-10-07）后：本页**只维护归档范围**，不再有"入库关键词"表单，
+也不再接受 keywords（关键词已不参与入库判定）。
+"""
 from __future__ import annotations
 
 import os
@@ -48,10 +52,11 @@ check("GET /filter -> 200", f.status_code == 200, str(f.status_code))
 check("含监控名单区块", "监控名单" in fs)
 check("含群下拉/人下拉", 'name="group"' in fs and 'name="sender"' in fs)
 check("含重点人入口", "/config/focus/a@chatroom" in fs)
-check("含入库关键词表单", 'name="keywords"' in fs)
+check("**_不再有入库关键词表单**（关键词已不参与入库）", 'name="keywords"' not in fs)
+check("明确写出「本页不影响入库」", "本页不影响入库" in fs)
 check("不再有 groups/senders 手填框", 'name="groups"' not in fs and 'name="senders"' not in fs)
 check("显示已监控的群（甲群）", "甲群" in fs)
-check("显示当前生效范围", "当前生效范围" in fs)
+check("显示当前归档范围", "当前归档范围" in fs)
 
 print("\n[2] /config 不再内联监控名单，只给链接")
 cf = c.get("/config")
@@ -61,12 +66,13 @@ check("有跳转链接", "去监控规则页设置" in cs)
 check("没有内联的监控表单", "config_filter_save" not in cs, "内联表单应已移除")
 check("导航里监控规则仍在", "监控规则" in c.get("/").get_data(as_text=True))
 
-print("\n[3] 保存关键词不会清空监控名单（回归防护）")
+print("\n[3] 提交 keywords 被忽略、监控名单不被清空（回归防护）")
 r = c.post("/filter/update", data={"keywords": "报价\n合同", "case_insensitive": "on"},
            follow_redirects=False)
 cfg = yaml.safe_load((SC / "config.yaml").read_text(encoding="utf-8"))
-check("保存关键词 -> 302", r.status_code == 302, str(r.status_code))
-check("关键词已更新", cfg["filter"]["keywords"] == ["报价", "合同"], str(cfg["filter"]["keywords"]))
+check("保存 -> 302", r.status_code == 302, str(r.status_code))
+check("**keywords 未被改写**（服务端不接收）",
+      cfg["filter"]["keywords"] == ["报价"], str(cfg["filter"]["keywords"]))
 check("**监控群未被清空**", cfg["filter"]["groups"] == ["a@chatroom"], str(cfg["filter"]["groups"]))
 
 print("\n[4] 监控名单增删仍可用（在 /filter 页上）")

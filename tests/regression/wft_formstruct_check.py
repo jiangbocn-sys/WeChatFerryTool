@@ -1,4 +1,4 @@
-﻿"""验证：/config 渲染出的表单结构合法 —— 监控名单的 form 在外层表单之外，且各自独立。"""
+"""验证：/config 渲染出的表单结构合法 —— 监控名单的 form 在外层表单之外，且各自独立。"""
 from __future__ import annotations
 
 import os
@@ -50,25 +50,34 @@ forms = re.findall(r"<form[^>]*>", html)
 print("   form 数:", len(forms))
 for f in forms:
     print("     ", f[:110])
-check("渲染出的 form 数量 = 监控区 4 + 主表单 1 = 5", len(forms) == 5, str(len(forms)))
+check("渲染出的 form 数量 = 监控区 3 + 归档范围表单 1 = 4", len(forms) == 4, str(len(forms)))
+# 说明：/filter 页原来的「入库关键词」表单在 R-002（2026-10-07）被移除 ——
+# 关键词不再参与入库判定，页面改成"只维护归档范围 + 指向标定页的链接"，
+# 免得出现"看着能改、其实对入库没用"的误导。
 check("没有 name=text（说明没渲染出旧 JSON 编辑器）", 'name="text"' not in html)
 
-# 关键：每个 form 的 action，以及"主表单"之后不应再出现其它 form 的开始标签
-i_main = next(i for i, f in enumerate(forms) if 'action="/filter/update"' in f)
-check("表单页的 form 都在监控区之后（监控区 form 在前）", i_main == len(forms) - 1, f"index={i_main}")
-check("监控区的 form 指向 config_filter_save",
-      all("/config/filter/save" in f for f in forms[:i_main]), str([f[:60] for f in forms[:i_main]]))
+# 关键：本页现在**只有监控区的 form**（入库关键词表单已在 R-002 移除），
+# 所以这里改成断言"每个 form 都指向 config_filter_save"，以及"页面不含 /filter/update 表单"。
+check("每个 form 都指向 config/filter/save（监控区）",
+      all("/config/filter/save" in f for f in forms), str([f[:60] for f in forms]))
+check("**页面上不再有 /filter/update 表单**（关键词表单已移除）",
+      'action="/filter/update"' not in html)
 
-# DOM 顺序：include 的监控区块出现在主表单之前
+# DOM 顺序：监控区块之后还有指向标定页的"每群敏感关键词"入口
+# 注意不能直接找 "/labels"：左侧导航里就有这个链接（位置更靠前），会误判。
 i_mon = html.find("监控名单")
-i_form = html.find('action="/filter/update"')
-check("监控名单区块在主表单之前（DOM 顺序）", 0 <= i_mon < i_form, f"{i_mon} < {i_form}")
+i_labels_card = html.find("归档关键词")
+check("监控名单区块之后有「归档关键词 → 标定页」的说明卡",
+      0 <= i_mon < i_labels_card, f"监控名单@{i_mon} < 归档关键词卡@{i_labels_card}")
+check("该卡给出标定页入口", 'href="/labels"' in html)
 
-# 不能出现嵌套：主表单之后的 HTML 里不应再有 <form ...> 直到 </form>
-tail = html[i_form:]
-close = tail.find("</form>")
-inner = tail[:close].count("<form")
-check("主表单内部没有嵌套 form", inner == 0, f"内部 form 数={inner}")
+# 不能出现嵌套：任一 form 内部不得再出现 <form
+nested = 0
+for m in re.finditer(r"<form[^>]*>", html):
+    tail = html[m.end():]
+    close = tail.find("</form>")
+    nested += tail[:close].count("<form") if close >= 0 else 0
+check("没有任何 form 嵌套", nested == 0, f"嵌套 form 数={nested}")
 
 print("\n[2] 监控区功能仍然可用")
 # 只取"添加群"那个 form 里的下拉框内容来检查

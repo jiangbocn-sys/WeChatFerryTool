@@ -167,21 +167,27 @@ check("标定字节完全未变", (SC / "data" / "labels.json").read_text(encodi
 check("拒绝时也不该产生备份（没写就没备份）", not list(SC.glob("config.yaml.bak-*")),
       str([p.name for p in SC.glob("config.yaml.bak-*")]))
 
-print("\n[C] /filter/update：只改关键词，监控名单与标定不许动")
+print("\n[C] /filter/update：只改大小写开关，监控名单 / 关键词 / 标定都不许动")
+# R-002（2026-10-07）后本页只维护**归档范围**：不再接收也不写 keywords。
+# 所以这里改成"提交里带上 keywords，但服务端必须**忽略**它"—— 这是新的隔离性要求。
 reset_files()
 b_cfg, b_labels = load()
-r = c.post("/filter/update", data={"keywords": "报价\n合同", "case_insensitive": "on"},
+r = c.post("/filter/update", data={"keywords": "报价\n合同", "case_insensitive": "off"},
            follow_redirects=False)
 a_cfg, a_labels = load()
 check("保存 -> 302", r.status_code == 302, str(r.status_code))
-check("关键词已更新", a_cfg["filter"]["keywords"] == ["报价", "合同"], str(a_cfg["filter"]["keywords"]))
+check("大小写开关已更新", a_cfg["filter"]["case_insensitive"] is False,
+      str(a_cfg["filter"]["case_insensitive"]))
+check("**keywords 被忽略（不再参与入库，服务端不接收）**",
+      a_cfg["filter"]["keywords"] == b_cfg["filter"]["keywords"],
+      f'{b_cfg["filter"]["keywords"]} -> {a_cfg["filter"]["keywords"]}')
 check("**监控名单未变**", a_cfg["filter"]["groups"] == b_cfg["filter"]["groups"]
       and a_cfg["filter"]["senders"] == b_cfg["filter"]["senders"],
       f'{a_cfg["filter"]["groups"]} / {a_cfg["filter"]["senders"]}')
 check("其余配置段未变", not diff_sections(b_cfg, a_cfg, {"filter"}))
-check("filter 段内除 keywords 外未变",
-      {k: v for k, v in b_cfg["filter"].items() if k != "keywords"} ==
-      {k: v for k, v in a_cfg["filter"].items() if k != "keywords"})
+check("filter 段内除 case_insensitive 外未变",
+      {k: v for k, v in b_cfg["filter"].items() if k != "case_insensitive"} ==
+      {k: v for k, v in a_cfg["filter"].items() if k != "case_insensitive"})
 check("labels.json 完全未变", a_labels == b_labels)
 check("写入留了备份", bool(list(SC.glob("config.yaml.bak-*"))),
       str([p.name for p in SC.glob("config.yaml.bak-*")]))

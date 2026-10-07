@@ -27,7 +27,6 @@ from pathlib import Path
 import yaml
 
 from consumer.asr import ASRClient
-from consumer.filter import Filter, FilterConfig
 from consumer.hook_client import HookClient, HookConfig, HookError
 from consumer.notifier import BarkConfig, Notifier
 from consumer.replier import Replier
@@ -145,7 +144,9 @@ class Consumer:
         self.cfg = cfg
         self._stop = False  # 必须最早初始化（后台线程会引用）
         self.store = Store(cfg["storage"]["sqlite_path"])
-        self.filter = Filter(FilterConfig.from_yaml(cfg["filter"]))
+        # 注意：**入库不再用 Filter**（需求 R-002，2026-10-07）—— 所有会话都入库，
+        # 只受"入库类型闸门"限制。`consumer/filter.py` 保留（独立可用/有回归），
+        # 但入库路径不再引用它；归档范围由 digest.py 读 filter.groups 决定。
         self.scorer = Scorer(ScorerConfig(
             base_url=cfg["llm"]["base_url"],
             api_key=cfg["llm"]["api_key"],
@@ -698,15 +699,16 @@ class Consumer:
                     # 临时诊断：手动发送的私聊消息，观察原始 payload 是否携带会话标识
                     log.info("[RAW-OUT-PRIVATE] %s", json.dumps(msg, ensure_ascii=False)[:500])
 
-            # 1. 过滤
-            ok, reason = self.filter.match(
-                group_name=group_name, sender=sender, content=content
-            )
-            if not ok:
-                log.debug("跳过 [%s] %s: %s", group_name, sender, content[:30])
-                return
+            # 1. 入库不再做"白名单过滤"（需求 R-002，2026-10-07 用户确认）：
+            #    **所有会话的消息都入库**，只受"入库类型闸门"（表情/系统/撤回等）限制。
+            #    监控名单（filter.groups）与关键词（filter.keywords）**不再是入库条件**，
+            #    它们只用于归档/总结的范围（见 consumer/digest.py::_monitored_groups 与
+            #    _in_digest 的敏感关键词命中）。老行为是"名单外的群连库都进不去"，
+            #    导致 9:47 那种"明明在微信里有、系统里查无此条"的困惑（10-07 踩到）。
 
             # 1.5 自动回复检查（只对"别人发来的"消息触发；自己发的不触发）
+            #     注意：回复的生效范围由**模板自己的 scope** 决定（replier._match_scope），
+            #     与上面的入库范围无关 —— 入库放开不会让回复变宽。
             if not is_self:
                 try:
                     self.replier.maybe_reply(
@@ -739,10 +741,10 @@ class Consumer:
                 log.debug("重复消息，跳过: %s", msg_id)
                 return
             if priority >= 1:
-                log.info("★入库 [%s] %s: %s (reason=%s, ★priority=%d %s)",
-                         group_name, sender, content[:50], reason, priority, prio_reason)
+                log.info("★入库 [%s] %s: %s (★priority=%d %s)",
+                         group_name, sender, content[:50], priority, prio_reason)
             else:
-                log.info("入库 [%s] %s: %s (reason=%s)", group_name, sender, content[:50], reason)
+                log.info("入库 [%s] %s: %s", group_name, sender, content[:50])
 
             # 3. LLM 评分 + 4. 高分推送（只对"别人发来的文本"；自发/非文本跳过，省 token）
             if is_text and not is_self:

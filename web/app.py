@@ -394,29 +394,35 @@ def create_app() -> Flask:
 
     @app.route("/filter/update", methods=["POST"])
     def filter_update():
+        """监控规则页的保存（R-002 之后：本页只维护**归档范围**，不碰入库）。
+
+        ⚠️ `filter.keywords` 已不再参与任何判定（入库不看、归档也不看），
+        所以这里**不再接收也不再写它** —— 避免"看着能改、其实没用"的误导。
+        它的现存值原样保留，不动用户配置。
+        """
         cfg = load_config()
         cfg.setdefault("filter", {})
         f = cfg["filter"]
 
-        # groups / senders / keywords 都是字符串列表
         def parse_lines(s: str) -> list[str]:
             return [ln.strip() for ln in (s or "").splitlines() if ln.strip()]
 
-        # 监控名单已由 /config/filter/save（下拉勾选）维护 —— 本表单不再提交 groups/senders，
+        # 监控名单已由 /config/filter/save（下拉勾选）维护 —— 本表单不提交 groups/senders，
         # 所以**只在表单确实带了该字段时才覆盖**，否则会把监控名单清空。
         if "groups" in request.form:
             f["groups"] = parse_lines(request.form.get("groups", ""))
         if "senders" in request.form:
             f["senders"] = parse_lines(request.form.get("senders", ""))
-        f["keywords"] = parse_lines(request.form.get("keywords", ""))
-        f["case_insensitive"] = request.form.get("case_insensitive") == "on"
+        if "case_insensitive" in request.form:
+            f["case_insensitive"] = request.form.get("case_insensitive") == "on"
 
         try:
             save_config(cfg)
         except (OSError, RuntimeError) as e:
             return save_error_page("监控规则", e)
-        logging.getLogger("web.app").info("监控规则已保存（关键词 %d 个）", len(f["keywords"]))
-        return redirect(url_for("filter_page", saved="1"))
+        logging.getLogger("web.app").info("监控规则已保存（归档范围：群 %d / 人 %d）",
+                                          len(f.get("groups") or []), len(f.get("senders") or []))
+        return redirect(url_for("filter_page", saved="归档范围"))
 
     # ---- 消息分类（入库类型闸门） ----
 
@@ -589,17 +595,19 @@ def create_app() -> Flask:
               "impact": "调用 DLL 接口的等待上限；太短会在微信卡顿时误判失败",
               "suggest": "默认 5.0"},
          ]},
-        {"key": "filter", "title": "监控规则（入库白名单）",
-         "note": "三项都是\"任一命中就入库\"；都留空 = 不限制（全部入库）。", "fields": [
-             {"path": "filter.groups", "label": "监控的群 / 会话", "kind": "list",
-              "impact": "只抓这些会话的消息；留空 = 所有群和私聊都抓",
-              "suggest": "每行一个 roomid（如 195940014@chatroom）或私聊 wxid；填了就只有这些会话入库"},
-             {"path": "filter.senders", "label": "监控的发送人", "kind": "list",
-              "impact": "只抓这些人发的消息（在任何会话里）；留空 = 不限人",
+        {"key": "filter", "title": "监控名单（只决定归档/总结范围）",
+         "note": "⚠️ 这里**不影响入库**：所有会话的消息都会入库（只挡类型，见「存储 / 入库闸门」）。"
+                 "监控名单是用来筛选 **23:30 归档与当日总结** 的范围。", "fields": [
+             {"path": "filter.groups", "label": "监控的群 / 会话（归档范围）", "kind": "list",
+              "impact": "只有名单里的群会进当日归档与总结（群里没设重点人 = 整群归档）；"
+                        "**名单外的群消息照样入库、可在消息浏览里查**",
+              "suggest": "每行一个 roomid（如 195940014@chatroom）；留空 = 不按群归档"},
+             {"path": "filter.senders", "label": "监控的人（归档范围）", "kind": "list",
+              "impact": "这些人的发言会进归档（无论哪个群）；同样不影响入库",
               "suggest": "每行一个 wxid"},
-             {"path": "filter.keywords", "label": "命中入库的关键词", "kind": "list",
-              "impact": "内容里含任一关键词就入库（大小写不敏感）；留空 = 不限内容",
-              "suggest": "如：报价 / 合同 / 付款 / deadline；注意这是\"入库白名单\"，与标定页的\"每群敏感关键词\"用途不同"},
+             {"path": "filter.keywords", "label": "归档关键词", "kind": "list",
+              "impact": "内容命中任一关键词就进归档（大小写不敏感）；**不影响入库**",
+              "suggest": "如：报价 / 合同 / 付款 / deadline"},
              {"path": "filter.case_insensitive", "label": "关键词忽略大小写", "kind": "bool",
               "impact": "关掉后英文关键词必须大小写完全一致才命中",
               "suggest": "建议勾选（开）"},

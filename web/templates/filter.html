@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>监控规则</h2>
+<h2>监控规则（归档范围）</h2>
 
 {% if request.args.get('saved') %}
 <div class="card" style="border-left:4px solid #27ae60; background:#eafaf1">
     <b>✅ 已保存</b>{% if request.args.get('saved') != '1' %}：{{ request.args.get('saved') }}{% endif %}。
-    监控名单改动会立即影响 <b>23:30 归档与总结的范围</b>；关键词改动立刻影响入库判定。
+    监控名单改动会立即影响 <b>23:30 归档与总结的范围</b>。
 </div>
 {% endif %}
 {% if request.args.get('error') %}
@@ -14,10 +14,11 @@
 </div>
 {% endif %}
 
-<p class="hint">
-    这一页管两件事：<b>监控名单</b>（哪些群/人进来，以及归档范围）和<b>入库关键词</b>（内容含关键词也入库）。
-    两处都是"任一命中即入库"。
-</p>
+<div class="card" style="background:#eaf4ff">
+    <b>⚠️ 本页不影响入库</b>：所有会话的消息<b>都会入库</b>（只受「🧩 消息分类」里的类型闸门限制，
+    表情恒排除）。本页的监控名单只决定 <b>23:30 归档与当日总结覆盖哪些群/人</b>；
+    名单外的群消息照样进库、可以在「💬 消息浏览」里查到。
+</div>
 
 {# 1) 监控名单：下拉勾选 + 每群重点关注人 #}
 {% include "_monitor_block.html" %}
@@ -27,53 +28,42 @@
 {% set kw  = cfg.get('keywords') or [] %}
 
 <div class="card" style="background:#eaf4ff">
-    <h3 style="margin-top:0">📊 当前生效范围</h3>
+    <h3 style="margin-top:0">📊 当前归档范围</h3>
     <div class="kv">
-        <div class="k">群 / 会话</div>
+        <div class="k">归档的群 / 会话</div>
         <div class="v">
             {% if grp %}
-                <strong>指定 {{ grp|length }} 个</strong>（见上方监控名单）
+                <strong>指定 {{ grp|length }} 个</strong>（见上方监控名单；群里没设重点人 = 整群归档）
             {% else %}
-                <strong style="color:#27ae60">🌐 全部监听</strong>（不限群）
+                <strong style="color:#27ae60">未指定</strong>（不按群归档）
             {% endif %}
         </div>
-        <div class="k">发送人</div>
+        <div class="k">归档的人</div>
         <div class="v">
             {% if snd %}
                 <strong>指定 {{ snd|length }} 个</strong>（见上方监控名单）
             {% else %}
-                <strong style="color:#27ae60">🌐 全部监听</strong>（不限人）
+                <strong>未指定</strong>
             {% endif %}
         </div>
-        <div class="k">关键词</div>
+        <div class="k">入库范围</div>
         <div class="v">
-            {% if kw %}
-                <strong>指定 {{ kw|length }} 个</strong>：<code>{{ kw|join('</code> <code>') }}</code>
-            {% else %}
-                <strong style="color:#f39c12">⚠️ 未设置</strong>（只靠监控名单决定谁入库）
-            {% endif %}
+            <strong style="color:#27ae60">全部会话</strong>（不受本页影响；只挡类型）
         </div>
     </div>
 </div>
 
-<div class="card">
-    <h3 style="margin-top:0">🔑 入库关键词</h3>
+<div class="card" style="border-left:4px solid #95a5a6">
+    <h3 style="margin-top:0">🔑 归档关键词（当前未生效）</h3>
     <p class="hint" style="margin:0 0 8px">
-        内容命中任一关键词就入库（不管发信人在不在监控名单里）。
-        <b>与归档无关</b>：归档范围由上方监控名单 + 每群敏感关键词决定。
+        这一项在 2026-10-07 的改动后<b>已不再参与任何判定</b>：入库不再看关键词，
+        归档也不看它。要"命中某词就进归档"，请到
+        <a href="{{ url_for('labels_page') }}">🏷 标定</a> 页设置<b>每群敏感关键词</b>。
     </p>
-    <form method="POST" action="{{ url_for('filter_update') }}">
-        <div class="form-row">
-            <label>keywords（每行一个，子串匹配）</label>
-            <textarea name="keywords" rows="6"
-                      placeholder="报价&#10;合同&#10;付款">{{ '\n'.join(kw) }}</textarea>
-            <div class="hint">子串包含即命中；大小写不敏感默认开（推荐）。</div>
-        </div>
-        <div class="form-row">
-            <label><input type="checkbox" name="case_insensitive" {% if cfg.get('case_insensitive', True) %}checked{% endif %}> 大小写不敏感</label>
-        </div>
-        <button type="submit">💾 保存关键词</button>
-        <span class="muted" style="font-size:12px">保存后立即生效（consumer 处理下一条消息时用新规则），不用重启。</span>
-    </form>
+    {% if kw %}
+    <div class="hint" style="margin-bottom:8px">配置里现存 {{ kw|length }} 个（保留不删，避免动你的配置）：
+        <code>{{ kw|join('</code> <code>') }}</code></div>
+    {% endif %}
+    <a class="button secondary" href="{{ url_for('labels_page') }}">去标定页设置每群敏感关键词 →</a>
 </div>
 {% endblock %}

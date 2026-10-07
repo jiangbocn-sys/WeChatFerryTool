@@ -52,6 +52,46 @@
   会补上当前用户的完全控制项并复检；备份/回退在 `D:\projects\.acl-recovery-20261007\`。
   修完 `dist` 之后**还要修 `build`**（同一条链上的两段），别以为修一个就够。
 
+* **入库范围已全开（R-002，10-07）**：`handle_message` **不再调用 `Filter.match`** ——
+  所有会话都入库，只受 `storage.ingest_exclude_types`（表情 47 恒排除）限制。
+  `filter.groups`（监控名单）**只决定 23:30 归档/总结范围**（`digest._monitored_groups()`），
+  `filter.keywords` **成了空转项**（入库不看、`_in_digest` 也不读），`filter.senders` 只在归档侧
+  对私聊有意义。⚠️ 改动前"名单外的群连库都进不去"是**静默**的（只写 debug 日志），
+  所以用户会看到"微信里有、系统里查无此条"（10-07 的 9:47 事件）。
+  回归：`wft_ingest_scope_check`（真 Consumer + 假 hook 端到端断言）。
+  ⚠️ 若将来要恢复"只抓指定群"，记得那是**新需求**，别再默认绑到监控名单上。
+
+* **相对路径的 `storage.sqlite_path` 是按"当前工作目录"解析的**（10-07 踩到）：
+  `store.Store(cfg["storage"]["sqlite_path"])` 不知道数据根，只有 app 会 `chdir(PROJECT_DIR)`。
+  所以**绕开 app 直接用 Consumer/Store**（脚本、回归）时，`data/messages.db` 会落到
+  `WeChatFerryTool\data\messages.db`（10-05 的老库！），而不是账号数据根 ——
+  我在新回归里就打开过真库（进程里出现 4233 条），幸亏那是老副本。
+  对策：**测试/脚本里一律用绝对路径**；想彻底修就改 Store 走"数据根优先"（未做，记在这）。
+
+* **"消息抓不到"的标准排查顺序**（10-07 实测总结，别再靠猜）：
+  1. `netstat -ano | findstr :30001`（hook 的 HTTP）、`:8888`（我们的回调）、`:6060`（Web）
+     —— 看三个端口的属主 PID。冻结版 app 会同时持有 8888+6060，hook 挂在微信 PID 上。
+     ⚠️ 沙箱里 `Get-NetTCPConnection` 看不到别的会话的监听、`Test-NetConnection` 反而能连通，
+     所以**用 `netstat -ano` 判断属主**、用 python/urllib 发请求（`Invoke-WebRequest` 会被
+     控制台读取拦成 WinError 5）。
+  2. **先证明我们这侧是好的**：往 `http://127.0.0.1:8888/hook/callback` POST 一条合成消息
+     （`{"event_type":1001,"type":1,"msgid":...,"roomid":"<监控名单里的群>","sender":"wxid_x",
+     "content":"...","timestamp":now}`）。它应当立刻在 `consumer.log` 出现「入库 …(reason=group_match)」
+     并触发评分。**注意 roomid 必须在 `filter.groups` 里**，否则被 `filter.match` 挡掉（会误判成 bug）。
+     → 这一步过了，说明 8888→入库 完好，问题在 hook 不转发。
+  3. 问 hook 本人：`POST :30001/QueryDB/GetAllDBName`、`POST /GetSelfProfile`、`POST /set_callback`。
+     10-07 的坏状态是：`GetAllDBName` 返回 `[]`、`QueryDB/execute` 一律
+     `get database handle which named xxx failed`、`GetSelfProfile` 返回**一个群的昵称**而不是本人
+     —— 而 `set_callback` / `SendTextMsg` 照样回 `ret:0 success`。**这些接口"成功"不代表 hook 健康**。
+  4. 判断"微信自己在不在收消息"：看微信库快照的 mtime
+     `D:\JiangBo\Documents\xwechat_files\<账号>\db_storage\message\message_0.db*`
+     —— 一直在写就说明微信正常，断点在 hook。
+  5. 结论模板：微信在收 + 我们的回调链路自测通过 + hook 的 DB/推送全废 ⇒ **hook 侧问题**，
+     处理：重启微信让 hook 重新加载 → 重登记回调（`tools\rehook_callback.py`）→ 再试；
+     不行就重新部署 `version.dll`；仍不行就换与该微信版本匹配的 hook。
+  * 排查用的现成脚本：`tools\probe_wx_msg.py`（用 DLL 查微信自己的库，验证某条消息在不在）、
+    `tools\rehook_callback.py`（重登记回调）。两者都只读/幂等。
+
 * **多群总结现在是"每群一份"**（10-07，用户选定）：`digest.summarize_mode: per_group`（默认）→
   每个会话一份 `summary-<日期>-<群名>.md`、**每群一次 LLM 调用**；`combined` → 一份
   `summary-<日期>.md`、只调一次。文件名：清洗 Windows 非法字符、群 id 兜底时剥掉 `@chatroom`、
