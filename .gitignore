@@ -42,6 +42,9 @@ __pycache__/
 *.wizard-accident
 cli.out
 
+# 排查工具的一次性产物（tools/snapshot_account.py 的基线文件，含本机路径信息）
+tools/.account_snapshot.json
+
 # ---- 编辑器 / 系统 ----
 .DS_Store
 Thumbs.db

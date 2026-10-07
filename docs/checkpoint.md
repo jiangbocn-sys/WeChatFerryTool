@@ -151,6 +151,34 @@
     D dry_run 不调 LLM + 落盘命名与头部 / E Web 三接口与坏输入 / F 页内展示与刷新存活 /
     G 与当日总结互不干扰）。
 
+* **语音问题的最终结论：PC 微信本地既没有音频、也没有"转文字"结果（10-07 穷尽排查）**：
+  背景：用户场景是**PC 微信 24 小时挂机、从不逐条点播放**，所以三级兜底也救不了。
+  逐步排除后确认：
+  1. **语音只存在服务器**：`silklength` 全库恒为 `0`；`voiceurl` 只有 101~102 字节
+     （protobuf 定位信息，不是音频；按 `length` 应是十几 KB 级）；`msg\attach` 下只有 `.dat`，
+     没有 Audio 目录；hook DLL 只有 `Decode_Pic/QueryDB/SendTextMsg…`，
+     试探 `/GetAudioMsg`、`/DownloadVoice` 等**全部 404**。
+  2. **点播放也不落盘**：实测播放一条语音后，整个账号目录 diff 只有
+     `Bubble\*_b.dat`（图片气泡）与 emoji 变化，`VoiceTemp` 无新文件。
+  3. **微信自带「转文字」的结果也不落地**：转文字后 diff 显示
+     `message_0.db(+wal)`、`sns.db` 有写入 → 于是用 keyhook 采的密钥离线读库
+     （`message_0.db` 有 74 张表，**每个会话一张 `Msg_<md5(conv_id)>`**），
+     解压 `message_content`（zstd，魔数 `28 b5 2f fd`，`WCDB_CT_message_content=4`）后确认：
+     语音行**只有 `<voicemsg .../>`**，没有转写文本；
+     在 `message_0.db` + `message_fts.db` + `media_0.db` + `message_resource.db` 全部表里
+     **搜遍已知语音内容（"神经暗洞"等），零命中** —— 命中的 25 处全是普通文本消息
+     （聊天里本来就有"世爻/申金/行李箱"这些词）。
+     → 结论：转文字是**每次现调服务器、只在界面显示**，本地不保存。
+  ⚠️ 踩到的坑：① `open_db` 在**同一个快照文件**上连续试多个 key 会失败，
+  **每个 key 必须用独立快照**（`tools/probe_keys_health.py` 用此法测出 6 个库全部可读）；
+  ② `sqlcipher3` 的 Cursor **不能配 `sqlite3.Row`**（TypeError），用元组下标；
+  ③ 排查输出被 PowerShell 吞过，结论性脚本要把结果**写文件**再读。
+  留下的工具：`tools/probe_keys_health.py`（keys 能用哪些库）、
+  `tools/snapshot_account.py`（操作前后 diff 账号目录，定位"某操作产生什么文件"）、
+  `tools/search_wechat_voicetext2.py`（证据脚本：全库搜语音转写文本）。
+  💡 可行替代：① 重要语音让人补文字；② 截图 + 本地 OCR（截图不可编程获取）；
+  ③ 手机端采集（另一套链路）。**不要在 PC 端继续找语音文件了，没有。**
+
 * **测试临时目录会在 `D:\projects` 下堆积（已修）**：35 套回归每套都在**仓库的上一级**
   （`D:\projects`）建 `.wft-*` 临时目录（套件里写的是绝对路径）。
   * 29 套在结尾有 `shutil.rmtree(SC)`，但**失败的套件根本走不到那行**；
