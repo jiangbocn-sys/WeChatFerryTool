@@ -102,6 +102,21 @@
     要拿到参考实现的算法（或换一台能上 GitHub 的机器把 `dat2img.go` 抓下来）。
   * 已就绪的判据（下次继续时直接用）：本地 `msg\video\*.jpg` 有 65 个**明文** JPEG 可当已知明文；
     181 个 `.dat` 的头部逐字节统计见 `tools\probe_dat_struct4.py` 输出。
+  * **又排除两条路**（10-07 追加）：
+    ✗ `msg\video\*.jpg` 是**视频缩略图**（`<stem>.jpg`/`<stem>_thumb.jpg` + `<stem>.mp4`），
+      与图片 `.dat` **没有同名交集** → 当不了"已知明文配对"（`tools\probe_dat_pair.py` 实测）。
+    ✗ DLL 的 `/Decode_Pic` 是个**空壳**：不论传 XML/path/msgid/裸 XML，一律回
+      `{"ret":0,"retmsg":"success"}`（裸 XML 才回 `{"msg":"invalid..."}`），不产出任何图片字节；
+      `/ForwardXMLMsg` 空 body 回 `{"ret":1,"retmsg":"fail"}`（且它会真发消息，不适合用来取图）
+      → 见 `tools/probe_dll_image.py`。
+  * **新线索（可能有用）**：`.dat` 的第 16~30 字节**在很多文件里完全相同**
+    （`_t.dat` 200 个样本里只有 4 种取值，最常见的一串出现在 124 个文件里：
+    `f2 aa 2d 4c fb 9c 93 5a 65 01 3e 5b cf c6 57`）→ 这一带不是"每文件随机的密文"，
+    更像**固定块/分组密钥/指纹**，是定死算法时最该先看的地方。
+  * **可落地的下一步**：用户在浏览器直接打开 GitHub 上的 `dat2img.go`
+    （`github.com/sjzar/chatlog`，用仓库自带的文件搜索找 `Dat2ImageV4` 所在文件，
+    或从 README 的 "Source Files" 进去），把内容贴进会话即可；本会话
+    `raw.githubusercontent.com` / `jsdelivr` / `proxy.golang.org` **都不通**，我取不到源码。
   * 备选落地方案（都不依赖 `.dat`）：① 让用户手动把某张图另存/截图后上传；
     ② 接视觉模型时由用户在微信里看图、把结论贴回来；③ 只做"元数据 + 提示用户去微信看"。
   * **`GET /media/<msg_id>` 与浏览页内联图因此暂缓**（元数据与卡片已上线，见上一节）。
