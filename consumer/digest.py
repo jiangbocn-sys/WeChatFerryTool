@@ -178,7 +178,7 @@ def _exclude_types() -> set[int]:
             return {int(x) for x in v}
     except Exception:  # noqa: BLE001
         pass
-    return {47, 51, 10000}   # 表情 / 系统 / 系统（撤回 10002 归入正文，保住上下文）
+    return {3, 47, 51, 10000}   # 图片(无法交给模型) / 表情 / 系统 / 系统
 
 
 def _kw_haystack(row) -> str:

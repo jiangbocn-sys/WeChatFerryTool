@@ -154,6 +154,20 @@ check("不在监控名单的群仍不进归档",
       digest_mod._in_digest({"group_name": "zz@chatroom", "sender": "wxid_x", "msg_type": 1,
                              "content": "x", "transcript": None},
                             labels_focus, excl, mon) is False)
+# 图片(3) 目前无法把内容交给模型（本地是加密 .dat、微信只在内存解密）→ 归到归档闸门里排除，
+# 避免 prompt 里出现一堆只有 `[图片 214×480]` 的空占位（10-07 用户决定：只传文本+语音转写）
+row_img = {"group_name": MON_GROUP, "sender": "wxid_img", "msg_type": 3,
+           "content": '<msg><img aeskey="x" cdnthumbwidth="214" cdnthumbheight="480"/></msg>',
+           "transcript": None}
+check("图片被归档闸门排除时不进归档",
+      digest_mod._in_digest(row_img, labels_focus, {3, 47, 51, 10000}, mon) is False)
+check("没排除图片时它仍会进归档（闸门是配置驱动的）",
+      digest_mod._in_digest(row_img, labels_focus, {47, 51, 10000}, mon) is True)
+check("真实 config.yaml 已把图片(3) 排除出归档",
+      3 in (yaml.safe_load((PROJ / "config.yaml").read_text(encoding="utf-8"))
+            .get("digest", {}).get("exclude_types") or []),
+      str(yaml.safe_load((PROJ / "config.yaml").read_text(encoding="utf-8"))
+          .get("digest", {}).get("exclude_types")))
 
 print("\n[3] 全抓之后数据量确实变大（这就是这个需求的代价，写下来备查）")
 cons.handle_message({"event_type": 1001, "type": 1, "msgid": "bulk", "wxid": OTHER_GROUP,
