@@ -30,6 +30,15 @@
 
 ## 关键事实（避免重复踩坑）
 
+* **git 推送/忽略规则**（10-07 定）：`.gitignore` 里 `config.yaml*`、`dist/`、`build/`、
+  `*.bak-*`、`.wft-*/` 一律不进 git；**`vendor/` 保留跟踪**（`keyhook3.dll` / `version.dll` /
+  `manifest.json`），但 **228 MB 的微信安装包 `vendor/*.exe` 不进 git**（按 `manifest.json`
+  里的 sha256 重新下载）；**`accounts/` 保留跟踪**（只含 `account.json` 元信息），
+  账号下的 `data/` `logs/` `reports/` 与配置备份全部忽略。
+  ⚠️ **DSH 沙箱里 `git push` 需要显式指定 ssh 路径**（默认的 `ssh` 会 `Host key verification failed`）：
+  `git -c core.sshCommand="C:/Windows/System32/OpenSSH/ssh.exe -o StrictHostKeyChecking=accept-new" push origin main`
+  —— 且写 `.git` 属于工作区外，shell 会被拒、需要一次授权升级。
+
 * **多群总结现在是"每群一份"**（10-07，用户选定）：`digest.summarize_mode: per_group`（默认）→
   每个会话一份 `summary-<日期>-<群名>.md`、**每群一次 LLM 调用**；`combined` → 一份
   `summary-<日期>.md`、只调一次。文件名：清洗 Windows 非法字符、群 id 兜底时剥掉 `@chatroom`、
