@@ -37,22 +37,45 @@ from consumer.store import Store
 from consumer.voice import capture_voice, decode_to_wav, find_wechat_files_dir
 from consumer.voice_tap import VoiceTap, conv_hash
 
-LABELS_PATH = Path(__file__).resolve().parent.parent / "data" / "labels.json"
-REPLY_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "reply_state.json"
-SENT_LOG_PATH = Path(__file__).resolve().parent.parent / "data" / "sent_log.json"
+from paths import config_path, data_root
+
+PROJECT_DIR = data_root()
+LABELS_PATH = PROJECT_DIR / "data" / "labels.json"
+REPLY_STATE_PATH = PROJECT_DIR / "data" / "reply_state.json"
+SENT_LOG_PATH = PROJECT_DIR / "data" / "sent_log.json"
 
 
 # ------- logging --------
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+# 日志目录/日志文件写不了**不能**让程序起不来：打包成 exe 后用户可能把它放在
+# 只读目录、或日志被别的进程占着。写不了就退回"只打控制台"，并明确警告一句。
+LOG_DIR = PROJECT_DIR / "logs"
+
+
+def _safe_stderr(msg: str) -> None:
+    """`--windowed` 打包时 sys.stderr 是 None，直接 print(file=sys.stderr) 会崩。"""
+    try:
+        if sys.stderr is not None:
+            print(msg, file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _build_log_handlers() -> list[logging.Handler]:
+    handlers: list[logging.Handler] = []
+    if sys.stdout is not None:          # 打包成 --windowed 时没有控制台
+        handlers.append(logging.StreamHandler(sys.stdout))
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(LOG_DIR / "consumer.log", encoding="utf-8"))
+    except OSError as e:
+        _safe_stderr(f"[warn] 无法写日志文件 {LOG_DIR / 'consumer.log'}（{e}），本次只输出到控制台")
+    return handlers
+
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_DIR / "consumer.log", encoding="utf-8"),
-    ],
+    handlers=_build_log_handlers(),
 )
 log = logging.getLogger("consumer.main")
 
@@ -69,7 +92,14 @@ def _need(d: dict, keys: list[str], where: str) -> None:
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    p = Path(__file__).resolve().parent.parent / path
+    # config.yaml 是**全局**的：账号目录优先，其次基目录（见 paths.config_path）。
+    # 注意不能直接拼 PROJECT_DIR —— 账号隔离后 PROJECT_DIR 是账号数据目录。
+    if path == "config.yaml":
+        p = config_path()
+    else:
+        p = Path(path)
+        if not p.is_absolute():
+            p = PROJECT_DIR / p
     if not p.exists():
         raise ConfigError(f"找不到配置文件: {p}（请把 config.example.yaml 复制为 config.yaml 再填值）")
     with open(p, "r", encoding="utf-8") as f:
@@ -138,6 +168,7 @@ class Consumer:
         self.self_wxid = (hook_cfg.get("self_wxid") or "").strip()
 
         # 标定文件（重要的群/联系人），用于给消息打 priority 标签
+        self._labels_mtime: float | None = None      # 热重载用（见 _maybe_reload_labels）
         self.labels = self._load_labels()
         n_g_imp = sum(1 for v in self.labels.get("groups", {}).values() if v.get("important"))
         n_s_imp = sum(1 for v in self.labels.get("senders", {}).values() if v.get("important"))
@@ -153,7 +184,25 @@ class Consumer:
         # 语音捕获（收到语音时立刻从微信 VoiceTemp 抓临时文件）
         voice_cfg = cfg.get("voice") or {}
         self.voice_enabled = bool(voice_cfg.get("enabled", True))
-        self.voice_dir = Path(__file__).resolve().parent.parent / (voice_cfg.get("dir") or "data/voices")
+
+        # 入库类型闸门：默认排除**表情**(type=47)。用户可在 Web 端「消息分类」里勾选。
+        # 注意「入库」与「归档」是两件事：这里只决定存不存，
+        # 归档的筛选（重点群 ∩ 重点成员/关键词）在 digest.py 里。
+        #
+        # **47 是硬闸门**：表情在任何情况下都不入库（Web 端也把它显示为不可取消）。
+        # 即使有人手工把 47 从 config.yaml 里删掉，这里也会加回来 —— 否则表情会混进归档。
+        storage_cfg = cfg.get("storage") or {}
+        excl = storage_cfg.get("ingest_exclude_types")
+        if excl is None:
+            excl = [47]
+        excl_types = {int(x) for x in excl}
+        if 47 not in excl_types:
+            log.warning("storage.ingest_exclude_types 里没有 47（表情）——已强制加回：表情不进库")
+            excl_types.add(47)
+        self.ingest_exclude_types = excl_types
+        log.info("入库类型闸门：排除类型 %s（表情 47 恒排除）",
+                 sorted(self.ingest_exclude_types))
+        self.voice_dir = PROJECT_DIR / (voice_cfg.get("dir") or "data/voices")
         self.wechat_dir = None
         self.voice_tap: VoiceTap | None = None
         if self.voice_enabled:
@@ -187,10 +236,32 @@ class Consumer:
         digest_cfg = cfg.get("digest") or {}
         self.digest_enabled = bool(digest_cfg.get("enabled", True))
         self.digest_time = str(digest_cfg.get("time") or "23:30")
-        self.digest_out_dir = Path(__file__).resolve().parent.parent / (digest_cfg.get("dir") or "reports")
+        self.digest_out_dir = PROJECT_DIR / (digest_cfg.get("dir") or "reports")
+        # 归档后是否顺带让 LLM 总结（默认开；没配 LLM 会自动跳过；digest.summarize: false 可关）
+        self.digest_summarize = bool(digest_cfg.get("summarize", True))
         if self.digest_enabled:
             threading.Thread(target=self._digest_loop, name="digest", daemon=True).start()
-            log.info("每日归档已启用：每天 %s 生成（目录 %s）", self.digest_time, self.digest_out_dir)
+            log.info("每日归档已启用：每天 %s 生成（目录 %s，归档后%s）",
+                     self.digest_time, self.digest_out_dir,
+                     "自动总结" if self.digest_summarize else "不自动总结")
+
+        # 消息库按期清理（需求 R-001）：后台静默、一天最多一次、分批可中断
+        from consumer.cleanup import MIN_RETENTION_DAYS, read_storage_cfg
+        _cl = read_storage_cfg(cfg)
+        self.cleanup_cfg = _cl
+        if _cl["retention_days"] > 0 and _cl["auto_cleanup"]:
+            threading.Thread(target=self._cleanup_loop, name="cleanup", daemon=True).start()
+            if _cl["retention_days"] < MIN_RETENTION_DAYS:
+                log.warning("数据清理：保留天数 %d 小于下限 %d，不会执行"
+                            "（请在设置页改成 ≥ %d）",
+                            _cl["retention_days"], MIN_RETENTION_DAYS, MIN_RETENTION_DAYS)
+            else:
+                log.info("数据清理已启用：每天 %s 后清理超过 %d 天的消息（%s）",
+                         _cl["cleanup_time"], _cl["retention_days"],
+                         "顺带 VACUUM" if _cl["vacuum"] else "只 checkpoint 收缩 WAL")
+        else:
+            log.info("数据清理：未启用（保留天数 %d，自动清理 %s）",
+                     _cl["retention_days"], _cl["auto_cleanup"])
 
         # 自动回复模块
         llm_cfg = cfg.get("llm") or {}
@@ -220,6 +291,10 @@ class Consumer:
 
     def _load_labels(self) -> dict:
         """读取 data/labels.json；文件不存在或解析失败返回空标定。"""
+        try:
+            self._labels_mtime = LABELS_PATH.stat().st_mtime
+        except OSError:
+            self._labels_mtime = None
         if not LABELS_PATH.exists():
             return {"groups": {}, "senders": {}}
         try:
@@ -233,11 +308,34 @@ class Consumer:
             log.warning("读取 labels.json 失败: %s（按无标定处理）", e)
             return {"groups": {}, "senders": {}}
 
+    def _maybe_reload_labels(self) -> bool:
+        """labels.json 被改过（Web 标定页 / 昵称自动关联）就重新加载。
+
+        以前标定只在启动时读一次 —— 页面上补完名字还得重启才生效，太别扭。
+        这里只在 mtime 变化时重读，代价可忽略。
+        """
+        try:
+            mt = LABELS_PATH.stat().st_mtime
+        except OSError:
+            return False
+        if self._labels_mtime == mt:
+            return False
+        old_g, old_s = len(self.labels.get("groups", {})), len(self.labels.get("senders", {}))
+        self.labels = self._load_labels()
+        new_g, new_s = len(self.labels.get("groups", {})), len(self.labels.get("senders", {}))
+        log.info("标定已热重载：群 %d→%d，联系人 %d→%d", old_g, new_g, old_s, new_s)
+        return True
+
     def _digest_loop(self) -> None:
         """后台线程：每天到点生成重点发言归档（状态持久化，防重启重复生成）。"""
-        state_path = Path(__file__).resolve().parent.parent / "data" / "digest_state.json"
+        state_path = PROJECT_DIR / "data" / "digest_state.json"
         while not self._stop:
             try:
+                # 标定被改过就热重载（Web 上点完"挖昵称/套用"立刻生效，不用重启）
+                try:
+                    self._maybe_reload_labels()
+                except Exception as e:  # noqa: BLE001
+                    log.debug("标定热重载检查失败: %s", e)
                 now = datetime.now()
                 today = now.strftime("%Y-%m-%d")
                 hhmm = now.strftime("%H:%M")
@@ -255,9 +353,60 @@ class Consumer:
                         encoding="utf-8",
                     )
                     log.info("每日归档已生成: %s", p)
+                    # 归档之后顺带让 LLM 总结（可用 digest.summarize=false 关掉）。
+                    # 单独 try：总结失败绝不能影响归档与状态文件。
+                    if self.digest_summarize:
+                        try:
+                            from consumer import summarize as summarize_mod
+                            if not summarize_mod.llm_ready():
+                                log.info("已跳过自动总结：未配置 LLM（base_url / model 为空）")
+                            else:
+                                res = summarize_mod.summarize(today, out_dir=self.digest_out_dir)
+                                if res is None:
+                                    log.info("已跳过自动总结：当天没有进入归档的消息")
+                                else:
+                                    log.info("自动总结已生成（方式=%s，%d 份文件）: %s",
+                                             res.mode, len(res.results),
+                                             "、".join(r.path.name for r in res.results))
+                                    for e in res.errors:
+                                        log.warning("部分会话总结失败：%s", e)
+                        except Exception:  # noqa: BLE001
+                            log.exception("自动总结失败（归档文件已正常生成，不影响后续运行）")
             except Exception:  # noqa: BLE001
                 log.exception("每日归档任务异常")
             # 每 60 秒检查一次
+            for _ in range(60):
+                if self._stop:
+                    return
+                time.sleep(1)
+
+    def _cleanup_loop(self) -> None:
+        """后台线程：到点清理超过保留天数的消息（R-001）。
+
+        与归档循环同构：60 秒一跳、状态文件防重复。差别是**必须静默**：
+        只写日志，不弹窗/不通知；失败也绝不能影响抓取（每轮整体 try 包住）。
+        """
+        from consumer.cleanup import cleanup_messages, resolve_db_path, should_run
+
+        while not self._stop:
+            try:
+                ok, why = should_run(self.cfg)
+                if ok:
+                    sc = self.cleanup_cfg
+                    log.info("开始自动清理：保留 %d 天（每天 %s 后一次）",
+                             sc["retention_days"], sc["cleanup_time"])
+                    res = cleanup_messages(
+                        resolve_db_path(sc["path"]),
+                        retention_days=sc["retention_days"],
+                        vacuum=sc["vacuum"],
+                        stop_event=self._stop,
+                    )
+                    if res.errors and not res.deleted:
+                        log.warning("自动清理未完成：%s", "；".join(res.errors))
+                else:
+                    log.debug("自动清理跳过：%s", why)
+            except Exception:  # noqa: BLE001
+                log.exception("自动清理任务异常（不影响抓取）")
             for _ in range(60):
                 if self._stop:
                     return
@@ -569,7 +718,12 @@ class Consumer:
             # 2. 计算 priority（命中重点关注群/联系人 → priority=1）
             priority, prio_reason = self._compute_priority(group_name, sender)
 
-            # 3. 入库
+            # 3. 入库类型闸门（Web 端可配）：只挡入库，不影响回复与自发追踪
+            if msg_type in self.ingest_exclude_types:
+                log.debug("入库闸门：类型 %d 已按配置排除，不入库 msg=%s", msg_type, msg_id)
+                return
+
+            # 4. 入库
             row_id = self.store.insert_message(
                 msg_id=msg_id,
                 group_name=group_name,
@@ -615,29 +769,70 @@ class Consumer:
         except Exception:  # noqa: BLE001
             log.exception("处理消息失败: %r", msg)
 
-    def run(self) -> None:
+    def _wait_for_dll(self, timeout_s: float, interval_s: float = 1.0) -> bool:
+        """等 DLL 就绪。app 模式会先启动本进程、再拉起微信，所以必须能等。"""
+        deadline = time.time() + timeout_s
+        last_log = 0.0
+        while time.time() < deadline:
+            if self._stop:
+                return False
+            try:
+                log.info("DLL 在线: %s", self.hook.status())
+                return True
+            except HookError:
+                now = time.time()
+                if now - last_log >= 10.0:
+                    last_log = now
+                    remain = int(deadline - now)
+                    log.info("等待微信/DLL 就绪…（剩余 %ds）", remain)
+                time.sleep(interval_s)
+        return False
+
+    def run(self, wait_for_dll: bool = False, dll_timeout_s: float = 600.0) -> None:
         # 启动期：探测 DLL 是否在
         try:
             status = self.hook.status()
             log.info("DLL 在线: %s", status)
         except HookError as e:
-            log.error("连不上 DLL: %s", e)
-            log.error("请确认微信已启动 + version.dll 在 WeChat 目录", exc_info=False)
-            sys.exit(3)
+            if not wait_for_dll:
+                log.error("连不上 DLL: %s", e)
+                log.error("请确认微信已启动 + version.dll 在 WeChat 目录", exc_info=False)
+                sys.exit(3)
+            log.info("DLL 尚未就绪，进入等待（微信还没起来）: %s", e)
 
-        # 启动 HTTP server
+        # 先起 HTTP server —— 这样微信一启动我们就能立刻注册回调
         self.start_server()
 
-        # 注册回调
-        try:
-            self.register_callback()
-        except HookError as e:
-            log.error("注册回调失败: %s", e)
-            sys.exit(3)
+        if wait_for_dll and not self._wait_for_dll(dll_timeout_s):
+            if self._stop:
+                log.info("等待期间收到停止信号")
+            else:
+                log.error("等待 DLL 超时（%.0fs）—— 微信没启动或 version.dll 缺失", dll_timeout_s)
+            self.store.close()
+            return
+
+        # 注册回调（app 模式下带重试，避免微信刚起来时竞态）
+        attempts = 30 if wait_for_dll else 1
+        for i in range(attempts):
+            try:
+                self.register_callback()
+                break
+            except HookError as e:
+                if i == attempts - 1:
+                    log.error("注册回调失败: %s", e)
+                    if not wait_for_dll:
+                        sys.exit(3)
+                    self.store.close()
+                    return
+                time.sleep(1.0)
 
         # 阻塞直到 stop()
-        signal.signal(signal.SIGINT, self.stop)
-        signal.signal(signal.SIGTERM, self.stop)
+        try:
+            signal.signal(signal.SIGINT, self.stop)
+            signal.signal(signal.SIGTERM, self.stop)
+        except ValueError:
+            # 非主线程（app 内嵌运行时）装不了信号处理器，由 app 负责调用 stop()
+            log.debug("非主线程运行，跳过信号处理器安装")
         log.info("进入消息循环。Ctrl+C 停止。")
         try:
             while not self._stop:

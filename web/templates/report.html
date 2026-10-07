@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px">
+    <h2 style="margin:0"><code style="font-size:18px">{{ name }}</code></h2>
+    <div>
+        <a class="button secondary" href="{{ url_for('report_download', name=name) }}">⬇ 下载</a>
+        <a class="button secondary" href="{{ url_for('digest_page') }}">← 返回</a>
+    </div>
+</div>
+
+<div class="card">
+    <pre style="white-space:pre-wrap; word-break:break-word; font-size:13px; line-height:1.7; margin:0">{{ text }}</pre>
+</div>
+{% endblock %}

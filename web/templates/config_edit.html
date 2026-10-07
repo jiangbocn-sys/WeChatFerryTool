@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>编辑「{{ meta.title }}」<code style="font-size:14px">{{ name }}</code></h2>
+
+<p class="hint">{{ meta.note }}</p>
+
+<div class="warn">
+    这是该段的**完整 JSON**：保存时整段替换（其它段不受影响）。保存前会校验 + 自动备份
+    <code>config.yaml.bak-&lt;时间戳&gt;</code>。改错不会影响其它段，可以从备份恢复。
+</div>
+
+{% if name == 'llm' %}
+<div class="card" style="background:#eaf4ff">
+    <b>提示：</b>改大模型建议用
+    <a href="{{ url_for('llm_page') }}">🧠 大模型设置</a> 表单页（不用手写 JSON，还能「测试连接」）。
+    {% if has_key %}<br>已保存过 API Key：<b>留空不会清除</b>，要清除请在 JSON 里把 <code>"api_key"</code> 设为 <code>""</code>。{% endif %}
+</div>
+{% elif name == 'storage' %}
+<div class="warn">
+    <code>ingest_exclude_types</code> 里列出的消息类型**不入库**；<b>47（表情）恒排除</b> ——
+    就算你从 JSON 里删掉，保存时也会自动加回。不想手写就用 <a href="{{ url_for('settings_page') }}">🧩 消息分类</a> 页勾选。
+</div>
+{% elif name == 'digest' %}
+<div class="warn">
+    <code>time</code> 是每天生成归档的时间（"HH:MM"）。<code>summarize: true</code> 表示归档后顺带让 LLM 写当日总结。
+    验配置时可以把 time 临时改成几分钟后，重启 app 观察一次。
+</div>
+{% elif name == 'replies' %}
+<div class="warn">
+    自动回复的模板/人设结构比较绕，建议用 <a href="{{ url_for('replies_page') }}">🤖 自动回复</a> 页编辑；
+    这里适合批量替换或精细调整。
+</div>
+{% endif %}
+
+<form method="POST" action="{{ url_for('config_section_save', name=name) }}">
+<div class="card">
+    <div class="form-row">
+        <label>{{ name }} 段（JSON）</label>
+        <textarea name="text" rows="22" spellcheck="false"
+                  style="width:100%; font-family:ui-monospace, Consolas, monospace; font-size:13px">{{ text }}</textarea>
+        <div class="hint">
+            必须是 <code>{ ... }</code> 对象。常见错误：<code>true/false</code> 写成 <code>True/False</code>、
+            最后一项多一个逗号、字符串没加引号。
+        </div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <button type="submit">💾 保存这一段</button>
+        <a class="button secondary" href="{{ url_for('config_page') }}">← 返回总设置</a>
+        {% if name == 'llm' %}<a class="button secondary" href="{{ url_for('llm_page') }}">🧠 用表单改大模型</a>{% endif %}
+    </div>
+</div>
+</form>
+
+<div class="card">
+    <h3 style="margin-top:0">当前这一段的原始内容（未脱敏，仅供核对）</h3>
+    <pre style="white-space:pre-wrap; word-break:break-word; background:#f8f9fa; padding:10px; border-radius:4px; font-size:12px; margin:0; max-height:200px; overflow:auto">{{ text }}</pre>
+    <p class="hint" style="margin:10px 0 0">配置文件：<code>{{ config_path }}</code> —— 保存后需要<b>重启 app</b> 才完全生效。</p>
+</div>
+{% endblock %}

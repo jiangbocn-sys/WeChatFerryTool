@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>大模型设置</h2>
+
+<p class="hint">
+    这里是改的是 <code>config.yaml</code> 的 <code>llm</code> 段（评分、自动回复、当日总结都用它）。
+    <b>只动这一段</b>，不会碰你的标定、自动回复模板、语音/ASR 等其它配置。
+    初始化向导（<a href="{{ url_for('setup_page') }}">/setup</a>）只适合第一次，它会按模板重建整份配置。
+</p>
+
+{% if request.args.get('saved') %}
+<div class="card" style="border-left:4px solid #27ae60; background:#eafaf1">
+    <b>已保存。</b>评分/总结会在下一次调用时用新配置 —— 正在运行的 app 需要<b>重启</b>才完全生效。
+</div>
+{% endif %}
+
+<form method="POST" action="{{ url_for('llm_update') }}">
+<div class="card">
+    <h3 style="margin-top:0">接口</h3>
+
+    <div class="form-row">
+        <label>base_url（OpenAI 兼容接口地址）</label>
+        <input type="text" name="base_url" value="{{ llm.base_url or '' }}"
+               placeholder="https://api.minimax.cn/v1" style="width:100%">
+        <div class="hint">
+            常用：MiniMax <code>https://api.minimax.cn/v1</code> ·
+            DeepSeek <code>https://api.deepseek.com/v1</code> ·
+            OpenAI <code>https://api.openai.com/v1</code> ·
+            本地 Ollama <code>http://127.0.0.1:11434/v1</code>
+        </div>
+    </div>
+
+    <div class="form-row">
+        <label>API Key</label>
+        <input type="password" name="api_key" value=""
+               placeholder="{{ '已保存 ' + key_hint + '，留空 = 不修改' if key_saved else 'sk-...' }}"
+               style="width:100%">
+        <div class="hint">
+            {% if key_saved %}
+                当前：<b>已保存 {{ key_hint }}</b>（出于安全不回显）。留空 = 保持原样；
+                想换就填新的。
+                <label style="display:inline-block; margin-left:10px">
+                    <input type="checkbox" name="clear_key"> 清空 key（不再使用 LLM）
+                </label>
+            {% else %}
+                还没有保存过 key。本地模型（Ollama 等）可以留空。
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="form-row">
+        <label>模型名（model）</label>
+        <input type="text" name="model" value="{{ llm.model or '' }}"
+               placeholder="MiniMax-M3 / deepseek-chat / gpt-4o-mini" style="width:320px">
+    </div>
+
+    <div class="form-row">
+        <label>推送阈值（push_threshold，评分 ≥ 该值才推送）</label>
+        <input type="number" name="push_threshold" min="1" max="5"
+               value="{{ llm.push_threshold if llm.push_threshold is not none else 4 }}" style="width:90px">
+        <div class="hint">当前 Bark 推送是关闭的，这个值主要影响评分结果是否标记为"要推送"。</div>
+    </div>
+
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <button type="submit">💾 保存</button>
+        <button type="button" id="btn-test" class="secondary">🔌 测试连接</button>
+        <span class="muted" id="test-hint" style="font-size:12px"></span>
+    </div>
+</div>
+</form>
+
+<div class="card">
+    <h3 style="margin-top:0">当前生效</h3>
+    <div class="kv">
+        <div class="k">配置文件</div><div class="v"><code>{{ config_path }}</code></div>
+        <div class="k">base_url</div><div class="v">{{ llm.base_url or '—' }}</div>
+        <div class="k">模型</div><div class="v">{{ llm.model or '—' }}</div>
+        <div class="k">API Key</div>
+        <div class="v">{% if key_saved %}<span style="color:#27ae60">已保存 {{ key_hint }}</span>{% else %}<span class="muted">未设置</span>{% endif %}</div>
+    </div>
+    <p class="hint" style="margin:10px 0 0">
+        「测试连接」会用上面表单里的值真实调用一次模型（消耗极少量额度），用来确认 key/模型填对没。
+        它<b>只测试、不保存</b>。
+    </p>
+</div>
+
+<script>
+(function () {
+    var btn = document.getElementById('btn-test');
+    var hint = document.getElementById('test-hint');
+    btn.addEventListener('click', function () {
+        hint.style.color = '#7f8c8d';
+        hint.textContent = '正在测试…（会真实调用一次模型）';
+        btn.disabled = true;
+        fetch('/api/llm/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                base_url: document.querySelector('input[name=base_url]').value.trim(),
+                model: document.querySelector('input[name=model]').value.trim(),
+                api_key: document.querySelector('input[name=api_key]').value.trim()
+            })
+        }).then(function (r) { return r.text().then(function (t) {
+            try { return { ok: r.ok, j: JSON.parse(t) }; } catch (e) { return { ok: false, j: null, raw: t }; }
+        }); }).then(function (res) {
+            btn.disabled = false;
+            var j = res.j;
+            if (!j) { hint.style.color = '#e74c3c'; hint.textContent = '测试失败（HTTP ' + (res.ok ? 200 : '?') + '）：' + String(res.raw || '').slice(0, 120); return; }
+            if (j.ok) {
+                hint.style.color = '#27ae60';
+                hint.textContent = '✅ 连接成功（' + j.seconds + 's，模型 ' + j.model + ' 回复：' + j.reply + '）';
+            } else {
+                hint.style.color = '#e74c3c';
+                hint.textContent = '❌ ' + (j.error || '失败');
+            }
+        }).catch(function (e) {
+            btn.disabled = false;
+            hint.style.color = '#e74c3c';
+            hint.textContent = '请求失败: ' + e;
+        });
+    });
+})();
+</script>
+{% endblock %}

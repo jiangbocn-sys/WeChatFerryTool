@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>保存失败</h2>
+
+<div class="card" style="border-left:4px solid #e74c3c">
+    <h3 style="margin-top:0; color:#e74c3c">「{{ what }}」没有写进去</h3>
+    <p style="margin:0 0 8px">{{ error }}</p>
+    <p class="muted" style="margin:0; font-size:12px">
+        常见的三种原因：配置文件/标定文件被设成了只读；数据目录没有写权限；
+        程序装在需要管理员权限的目录（例如 <code>C:\Program Files</code>）下。
+        改完权限再点一次保存即可，页面上的其他内容没有受影响。
+    </p>
+</div>
+
+<p>
+    <a class="button" href="javascript:history.back()">← 返回上一页</a>
+    <a class="button secondary" href="{{ url_for('dashboard') }}">回仪表盘</a>
+</p>
+{% endblock %}

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>选择重点关注的人 · {{ gname }}</h2>
+
+<p class="hint">
+    勾选后，<b>23:30 的归档与总结只包含这些人的发言</b>（其它人不会进归档）。
+    一个都不勾 = <b>整群归档</b>（该群所有消息，排除系统/撤回/表情等）。
+    <br>会话 ID：<code>{{ gid }}</code>
+</p>
+
+<div class="card">
+    <form method="POST" action="{{ url_for('config_filter_save') }}">
+        <input type="hidden" name="action" value="set_focus">
+        <input type="hidden" name="group" value="{{ gid }}">
+
+        {% if senders %}
+        <div style="display:flex; gap:8px; margin-bottom:8px">
+            <button type="button" class="secondary" onclick="document.querySelectorAll('input[name=focus]').forEach(function(e){e.checked=true})">全选</button>
+            <button type="button" class="secondary" onclick="document.querySelectorAll('input[name=focus]').forEach(function(e){e.checked=false})">全不选</button>
+            <span class="muted" style="font-size:12px; align-self:center">共 {{ senders|length }} 位可选</span>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:6px">
+            {% for s in senders %}
+            <label style="font-size:13px; padding:4px 6px; border:1px solid #ecf0f1; border-radius:4px">
+                <input type="checkbox" name="focus" value="{{ s.id }}" {% if s.id in focus %}checked{% endif %}>
+                {{ s.name }}
+                {% if s.member %}<span title="本群成员（离线从微信联系人库读到）" style="color:#27ae60; font-size:11px">本群</span>{% endif %}
+                {% if s.important %}<span title="全局重点联系人" style="color:#e67e22">★</span>{% endif %}
+                {% if s.name != s.id %}<div class="hint" style="margin:0"><code style="font-size:11px">{{ s.id }}</code></div>{% endif %}
+            </label>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty">还没有可选的人 —— 先去
+            <a href="{{ url_for('labels_page') }}">标定页</a>
+            或点<a href="{{ url_for('labels_page') }}">「🔄 从已抓消息挖昵称并套用」</a>把人补上。</p>
+        {% endif %}
+
+        <div style="margin-top:14px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+            <button type="submit">💾 保存重点关注人</button>
+            <a class="button secondary" href="{{ url_for('config_page') }}">← 返回总设置</a>
+            <span class="muted" style="font-size:12px">保存后立刻生效（标定是热重载的），归档下次生成时按新规则</span>
+        </div>
+    </form>
+</div>
+
+<div class="card" style="background:#f4fbf7">
+    <b>当前规则</b>
+    <div class="kv" style="margin-top:6px">
+        <div class="k">重点关注人</div>
+        <div class="v">{% if focus %}{{ focus|length }} 位 —— 只归档这些人的发言{% else %}<b>未设置 → 整群归档</b>{% endif %}</div>
+        <div class="k">该群敏感关键词</div>
+        <div class="v">{{ n_keywords }} 个（在<a href="{{ url_for('labels_page') }}">标定页</a>设置，命中的消息也会进归档）</div>
+    </div>
+    <p class="hint" style="margin:10px 0 0">
+        想验证效果：改完去 <a href="{{ url_for('digest_page') }}">📝 归档/总结</a> 页点「预览将发送的 prompt」，
+        或在那一页重新生成当天归档，立刻能看到包含哪些人。
+    </p>
+</div>
+{% endblock %}

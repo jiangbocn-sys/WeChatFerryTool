@@ -44,3 +44,26 @@ bark:
 # 存储
 storage:
   sqlite_path: data/messages.db
+  # 入库类型闸门：列在这里的 msg_type 不入库（编辑入口：Web「消息分类」页）。
+  # ⚠️ 表情 47 恒排除，写不写在这里都一样。
+  ingest_exclude_types: [47]
+  # ---- 消息库按期自动清理（编辑入口：Web「🧩 消息分类」页的「数据清理」区块）----
+  # 保留最近 N 个自然日（含今天）；更早的消息会被**真正删除**（不可恢复）。
+  # 0 = 不自动清理（默认；建议先观察一段时间再打开）。1~6 视为非法 → 不会执行。
+  retention_days: 0
+  # 是否每天自动清理一次（需 retention_days >= 7 才生效）
+  auto_cleanup: true
+  # 每天这个点之后清理一次（一天最多一次；与归档时间 23:30 错开）
+  cleanup_time: "00:00"
+  # 删完是否顺带 VACUUM 回收磁盘（会持锁较久，默认关；也可在页面上手动勾）
+  cleanup_vacuum: false
+
+# 每日重点发言归档 → Markdown（+ 可选的 LLM 当日总结）
+digest:
+  enabled: true
+  time: "23:30"
+  dir: reports
+  # 归档后顺带让 LLM 写一份当日总结（没配置 LLM 时自动跳过）
+  summarize: true
+  # 归档排除的消息类型（表情/系统/撤回）；改完可直接重跑当天归档，不必重新入库
+  exclude_types: [47, 51, 10000, 10002]

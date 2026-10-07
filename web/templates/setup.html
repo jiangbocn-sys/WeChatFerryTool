@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <h2 style="margin:0">初始化设置</h2>
+    <span class="tag" style="background:{{ '#f39c12' if not rep.ready_to_configure else '#27ae60' }}">
+        {{ '存在阻塞项' if not rep.ready_to_configure else '环境可用于初始化' }}
+    </span>
+</div>
+
+{% if rep.blockers %}
+<div class="card" style="border-left:4px solid #e74c3c">
+    <h3 style="margin-top:0;color:#e74c3c">必须先解决</h3>
+    <ul style="margin:0;padding-left:20px">
+        {% for b in rep.blockers %}<li>{{ b }}</li>{% endfor %}
+    </ul>
+    <p class="muted" style="margin:10px 0 0;font-size:12px">
+        这些是环境问题（微信未装 / 版本不符 / 随包文件缺失），程序无法自行绕过。
+    </p>
+</div>
+{% endif %}
+
+<div class="card">
+    <h3>① 环境检查（自动采集）</h3>
+    <div class="kv">
+        <div class="k">微信</div><div class="v">
+            {% if rep.wechat.installed %}已安装 {{ rep.wechat.version }}
+                {% if rep.wechat.version_ok %}<span style="color:#27ae60">✓ 与 hook 要求一致</span>
+                {% else %}<span style="color:#e74c3c">✗ 要求 {{ rep.wechat.expected }}</span>{% endif %}
+            {% else %}<span style="color:#e74c3c">未安装</span>（{{ rep.wechat.dir }}）{% endif %}
+        </div>
+        <div class="k">version.dll</div><div class="v">
+            {% if rep.hook.state == 'ok' %}<span style="color:#27ae60">已就位，哈希一致 ✓</span>
+            {% elif rep.hook.state == 'missing' %}<span style="color:#f39c12">尚未部署</span>
+            {% elif rep.hook.state == 'mismatch' %}<span style="color:#f39c12">已存在但不是随包版本（部署时先备份）</span>
+            {% else %}<span style="color:#e74c3c">{{ rep.hook.state }}</span>{% endif %}
+        </div>
+        <div class="k">微信账号</div><div class="v">
+            {% if rep.account.active %}{{ rep.account.slug }}
+                <span class="muted">（self_wxid = {{ rep.account.self_wxid }}）</span>
+            {% else %}<span style="color:#e74c3c">未找到账号目录</span>{% endif %}
+        </div>
+        <div class="k">DLL API</div><div class="v">
+            {% if rep.dll_api.ready %}在线{% else %}<span class="muted">离线（微信未运行时正常）</span>{% endif %}
+        </div>
+        <div class="k">历史数据</div><div class="v">
+            {{ rep.data.messages if rep.data.messages is defined and rep.data.messages >= 0 else '—' }} 条消息 ·
+            {{ rep.data.labels if rep.data.labels is defined and rep.data.labels >= 0 else '—' }} 项标定
+            <span class="muted">（数据根 {{ rep.data.data_root }}）</span>
+        </div>
+        <div class="k">随包安装程序</div><div class="v">
+            {% if rep.installer.present %}有（{{ rep.installer.file }}）{% else %}<span class="muted">无（版本不符时无法自动重装）</span>{% endif %}
+        </div>
+    </div>
+
+    {% if plan.needs_deploy %}
+    <div style="margin-top:12px">
+        <h4 style="margin:0 0 6px">将执行的部署步骤</h4>
+        <ol style="margin:0;padding-left:20px;font-size:13px">
+            {% for s in plan.steps %}<li>{{ s }}</li>{% endfor %}
+        </ol>
+        <button id="btn-deploy" style="margin-top:10px">部署 version.dll（会弹一次管理员授权）</button>
+        <p class="muted" id="deploy-hint" style="margin:8px 0 0;font-size:12px">
+            部署前请完全退出微信 —— 文件被占用时会失败（程序不会替你关微信）。
+        </p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>② 运行方式</h3>
+    <div style="display:grid;gap:8px;font-size:14px">
+        <label><input type="radio" name="run_mode" value="capture" checked>
+            <b>只抓取与归档</b> —— 收消息、评分、每日归档；<span style="color:#27ae60">不发送任何消息</span></label>
+        <label><input type="radio" name="run_mode" value="capture_reply">
+            <b>抓取 + 自动回复</b> —— 额外启用自动回复；<span style="color:#e74c3c">封号风险较高</span></label>
+    </div>
+</div>
+
+<div class="card">
+    <h3>③ 大模型（可选）</h3>
+    <p class="muted" style="margin:0 0 10px;font-size:12px">
+        客户端走 <b>OpenAI 兼容协议</b>，base_url 直接透传 —— 换 provider 不用改代码。
+        不填则消息照常抓取入库，只是不做评分、也不用 LLM 生成回复。
+    </p>
+    <div style="display:grid;gap:10px;max-width:620px">
+        <label>Provider 预设
+            <select id="provider" style="width:100%">
+                <option value="">— 不使用大模型 —</option>
+                <option value="https://api.openai.com/v1|gpt-4o-mini">OpenAI</option>
+                <option value="https://api.deepseek.com/v1|deepseek-chat">DeepSeek</option>
+                <option value="https://dashscope.aliyuncs.com/compatible-mode/v1|qwen-plus">阿里通义</option>
+                <option value="https://api.moonshot.cn/v1|moonshot-v1-8k">月之暗面</option>
+                <option value="https://api.minimax.cn/v1|MiniMax-M3">MiniMax</option>
+                <option value="http://127.0.0.1:11434/v1|llama3.1">Ollama（本地，无需 key）</option>
+                <option value="custom">自定义…</option>
+            </select>
+        </label>
+        <label>base_url
+            <input type="text" id="llm_base_url" value="{{ peek.llm_base_url or '' }}"
+                   placeholder="https://api.deepseek.com/v1" style="width:100%">
+        </label>
+        <label>API Key
+            <span class="muted" id="key-hint">
+                {% if peek.llm_api_key_saved %}
+                    已保存 {{ peek.llm_api_key_hint }} —— 留空 = 不修改
+                {% else %}
+                    （本地模型可留空）
+                {% endif %}
+            </span>
+            <input type="password" id="llm_api_key" value=""
+                   placeholder="{{ '已保存，留空即不修改' if peek.llm_api_key_saved else 'sk-...' }}"
+                   style="width:100%">
+        </label>
+        <label>模型名
+            <input type="text" id="llm_model" value="{{ peek.llm_model or '' }}"
+                   placeholder="deepseek-chat" style="width:280px">
+        </label>
+        <label>归档时间
+            <input type="text" id="digest_time" value="{{ peek.digest_time }}" style="width:90px">
+        </label>
+        <label><input type="checkbox" id="capture_keys">
+            启用密钥采集（仅离线解密回填历史时用；日常抓消息不需要，且需管理员权限）</label>
+        {% if peek.config_path %}
+        <div class="muted" style="font-size:11px">
+            当前配置文件：<code>{{ peek.config_path }}</code>
+            {% if peek.llm_base_url or peek.llm_api_key_saved %}（已读到已保存的配置）{% else %}（还没有配置内容）{% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card" id="tpl-card" style="display:none">
+    <h3>④ 自动回复模板</h3>
+    <p class="muted" style="margin:0 0 10px;font-size:12px">
+        这里先建 <b>一个</b>模板；需要多个到「自动回复」页再加。
+        <b>不用 LLM 时只需填「固定回复」</b>，模板会原样发出这句话。
+    </p>
+    <div style="display:grid;gap:10px;max-width:620px">
+        <label>触发关键词
+            <input type="text" id="tpl_trigger" value="@我" style="width:220px">
+            <span class="muted">（消息里出现这个词才回复；可填多个模板各自不同的词）</span>
+        </label>
+        <label>匹配方式
+            <select id="tpl_match" style="width:200px">
+                <option value="substring">包含（substring）</option>
+                <option value="exact">完全相同（exact）</option>
+                <option value="regex">正则（regex）</option>
+            </select>
+        </label>
+        <label><input type="checkbox" id="tpl_use_llm">
+            用大模型根据对话生成回复（需要上面 ③ 配置好）</label>
+        <label><span id="tpl_resp_label">固定回复内容</span>
+            <textarea id="tpl_response" rows="2" style="width:100%">我暂时离开，稍后回复</textarea>
+        </label>
+        <label id="tpl_fb_row" style="display:none">大模型不可用时的固定兜底
+            <input type="text" id="tpl_fallback" value="我现在不方便，稍后回你" style="width:100%">
+            <span class="muted">留空则用内置的「[自动回复：稍后再聊]」</span>
+        </label>
+        <label><input type="checkbox" id="tpl_test_only" checked>
+            仅记录不发送（test_only，先观察匹配是否准确）</label>
+    </div>
+    <p class="muted" style="font-size:12px;margin:10px 0 0">
+        提示：人设文本不会直接被发出去 —— 启用大模型时「固定回复内容」变成人设/指令，
+        大模型失败才发兜底文案。
+    </p>
+</div>
+
+<div class="card">
+    <div style="display:flex;gap:10px;align-items:center">
+        <button id="btn-apply" {% if not rep.ready_to_configure %}disabled{% endif %}>保存并完成初始化</button>
+        <span class="muted" id="apply-hint" style="font-size:12px"></span>
+    </div>
+</div>
+
+<script>
+(function () {
+    function $(id) { return document.getElementById(id); }
+
+    // ---- provider 预设 ----
+    $('provider').addEventListener('change', function () {
+        var v = this.value;
+        if (!v) { $('llm_base_url').value = ''; $('llm_model').value = ''; return; }
+        if (v === 'custom') { $('llm_base_url').focus(); return; }
+        var parts = v.split('|');
+        $('llm_base_url').value = parts[0];
+        $('llm_model').value = parts[1] || '';
+        if (parts[0].indexOf('127.0.0.1') >= 0 || parts[0].indexOf('localhost') >= 0) {
+            $('key-hint').textContent = '（本地模型，可留空）';
+        } else {
+            $('key-hint').textContent = '（该 provider 需要 key）';
+        }
+    });
+
+    // ---- 运行方式切换：显示/隐藏模板卡片 ----
+    function syncMode() {
+        var m = document.querySelector('input[name=run_mode]:checked').value;
+        $('tpl-card').style.display = (m === 'capture_reply') ? 'block' : 'none';
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('input[name=run_mode]'), function (r) {
+        r.addEventListener('change', syncMode);
+    });
+    syncMode();
+
+    // ---- 是否用 LLM：改变字段语义 ----
+    $('tpl_use_llm').addEventListener('change', function () {
+        if (this.checked) {
+            $('tpl_resp_label').textContent = '人设 / 指令（不会直接发出）';
+            $('tpl_fb_row').style.display = 'block';
+        } else {
+            $('tpl_resp_label').textContent = '固定回复内容（原样发出）';
+            $('tpl_fb_row').style.display = 'none';
+        }
+    });
+
+    // ---- 部署 ----
+    var dep = $('btn-deploy');
+    if (dep) dep.addEventListener('click', function () {
+        dep.disabled = true;
+        $('deploy-hint').textContent = '正在提权部署…（请在 UAC 弹窗上确认）';
+        fetch('/api/setup/deploy-dll', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+                $('deploy-hint').textContent = j.ok ? ('部署成功：' + (j.action || ''))
+                    : ('部署失败：' + (j.error || JSON.stringify(j.result || j)));
+                if (j.ok) setTimeout(function () { location.reload(); }, 1200);
+                dep.disabled = false;
+            })
+            .catch(function (e) { $('deploy-hint').textContent = '请求失败: ' + e; dep.disabled = false; });
+    });
+
+    // ---- 保存 ----
+    $('btn-apply').addEventListener('click', function () {
+        var mode = document.querySelector('input[name=run_mode]:checked').value;
+        var body = {
+            run_mode: mode,
+            self_wxid: {{ (rep.account.self_wxid or '') | tojson }},
+            digest_time: $('digest_time').value.trim() || '23:30',
+            llm_base_url: $('llm_base_url').value.trim(),
+            llm_api_key: $('llm_api_key').value.trim(),
+            llm_model: $('llm_model').value.trim(),
+            capture_keys: $('capture_keys').checked,
+            template: {
+                trigger: $('tpl_trigger').value.trim(),
+                match_type: $('tpl_match').value,
+                response: $('tpl_response').value,
+                use_llm: $('tpl_use_llm').checked,
+                fallback: $('tpl_fallback').value.trim(),
+                test_only: $('tpl_test_only').checked
+            }
+        };
+        $('apply-hint').textContent = '保存中…';
+        // 已保存过 key 时：输入框留空 = 不修改（回传哨兵值，而不是空串把 key 抹掉）
+        var keyInput = $('llm_api_key').value.trim();
+        if (!keyInput && {{ (peek.llm_api_key_saved | tojson) }}) {
+            body.llm_api_key = '__KEEP__';
+        }
+        fetch('/api/setup/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        }).then(function (r) {
+            // 后端出错时可能是 HTML 页 → 直接 r.json() 会抛 "Unexpected token <"，
+            // 在浏览器里显示成莫名的 TypeError: Failed to fetch。这里显式区分。
+            return r.text().then(function (t) {
+                var j = null;
+                try { j = JSON.parse(t); } catch (e) {}
+                return { status: r.status, json: j, text: t };
+            });
+        })
+          .then(function (res) {
+              var j = res.json;
+              if (!j) {
+                  $('apply-hint').textContent = '保存失败（HTTP ' + res.status + '）：'
+                      + res.text.replace(/<[^>]*>/g, ' ').slice(0, 160);
+                  return;
+              }
+              if (!j.ok) { $('apply-hint').textContent = '失败：' + (j.error || JSON.stringify(j)); return; }
+              $('apply-hint').innerHTML = '已写入 <code>' + j.path + '</code>'
+                  + '（模板 ' + j.templates + ' 个）<br>请<b>重启 app</b> 使配置生效。';
+          })
+          .catch(function (e) { $('apply-hint').textContent = '请求失败: ' + e; });
+    });
+})();
+</script>
+{% endblock %}

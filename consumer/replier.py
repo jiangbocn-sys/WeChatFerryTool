@@ -49,6 +49,10 @@ class ReplyTemplate:
     scope_senders: list[str] = field(default_factory=list)  # 空 = 不限人
     test_only: bool = True     # 默认只记录不发
     use_llm: bool = False      # True 时用 LLM 动态生成回复（response 字段作为人设）
+    # LLM 不可用（未配 key / 调用失败 / 超时）时发送的固定文案。
+    # 必须与 response 分开：use_llm=True 时 response 是**人设指令**，
+    # 直接发出去会"破功"，所以不能拿它兜底。
+    fallback: str = ""
 
 
 @dataclass
@@ -116,6 +120,7 @@ class Replier:
                     scope_senders=[str(s) for s in (t.get("scope") or {}).get("senders") or []],
                     test_only=bool(t.get("test_only", True)),
                     use_llm=bool(t.get("use_llm", False)),
+                    fallback=str(t.get("fallback", "") or ""),
                 ))
             except Exception as e:  # noqa: BLE001
                 log.warning("解析模板失败，跳过: %s (err=%s)", t, e)
@@ -313,10 +318,17 @@ class Replier:
         if template.use_llm:
             text = self._generate_reply(template, group_name, sender, content)
             if text is None:
-                # LLM 失败：兜底（避免 persona 泄露破功）
-                log.warning("LLM 生成失败，使用安全兜底（persona=%s）", template.name)
+                # LLM 失败：优先用模板自带的固定兜底；没配才用内置极简文案。
+                # 绝不回退到 response —— use_llm=True 时那是人设，发出去会破功。
                 llm_failed = True
-                text = "[自动回复：稍后再聊]"  # 极简兜底，不解释原因（避免破功）
+                fb = (template.fallback or "").strip()
+                if fb:
+                    log.warning("LLM 生成失败，改用模板固定兜底（persona=%s）", template.name)
+                    text = fb
+                else:
+                    log.warning("LLM 生成失败且模板未配 fallback，使用内置兜底（persona=%s）",
+                                template.name)
+                    text = "[自动回复：稍后再聊]"
         else:
             text = template.response
 

@@ -81,9 +81,30 @@ class HookClient:
         """
         return self._post("/GetSelfProfile", {})
 
-    def query_db(self, sql: str) -> dict:
-        """执行 SQL（极少数场景需要，比如查好友/群列表）。DLL 文档说只读。"""
-        return self._post("/QueryDB/execute", {"sql": sql})
+    def query_db(self, sql: str, db_name: str = "") -> dict:
+        """执行 SQL（只读）。**必须给 db_name**，否则 DLL 回
+        `{"status": -1, "desc": "get database handle which named failed"}`。
+
+        契约（来自 WeChatHook-src/README.md + src/QueryDB.cpp）：
+            请求 {"optDbName": "MicroMsg.db", "SQL": "SELECT ..."}
+            响应 {"status": 0, "desc": "", "data": [ {...}, ... ]}
+        库名用 `list_dbs()` 拿 —— 磁盘上的文件名（contact.db）和 DLL 里挂的名字可能不同。
+        """
+        return self._post("/QueryDB/execute", {"optDbName": db_name, "SQL": sql})
+
+    def list_dbs(self) -> list[dict]:
+        """列出 DLL 已挂的数据库：[{"dbName": "xxx.db", "dbHandle": 123}, ...]。"""
+        res = self._post("/QueryDB/GetAllDBName", {})
+        if isinstance(res, list):
+            return [r for r in res if isinstance(r, dict)]
+        if isinstance(res, dict):
+            for k in ("data", "list", "dbs", "result"):
+                v = res.get(k)
+                if isinstance(v, list):
+                    return [r for r in v if isinstance(r, dict)]
+            if "dbName" in res:
+                return [res]
+        return []
 
     def send_text(self, to_wxid: str, msg: str) -> dict:
         """发文本消息。

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "generated": "2026-10-05",
+  "note": "版本绑定清单。hook DLL 内部的函数偏移只对指定微信版本有效，跨版本使用可能导致微信启动异常，切勿混用。",
+  "wechat": {
+    "version": "4.1.10.27",
+    "installer": "wechat4.1.10.27.exe",
+    "installer_sha256": "54203FC2B41983FA106B0AF0D67F86BEFC56CCD3DC1005D4BAB6DE8EA36B4F74",
+    "installer_present": true,
+    "installer_size": 239441904,
+    "download_hint": "https://pc.weixin.qq.com/ （请取与 version 一致的安装包）"
+  },
+  "hook_dll": {
+    "file": "version.dll",
+    "size": 606208,
+    "sha256": "23948E7D933FF40735DDC0CC516641FD9F935D67FFDEC476BB8DB61B79940F29",
+    "for_wechat": "4.1.10.27",
+    "origin": "aixed/WeChat-Hook（第三方作品，自用；公开再分发请注意许可）",
+    "target_dir": "C:\\Program Files\\Tencent\\Weixin"
+  },
+  "keyhook": {
+    "file": "keyhook3.dll",
+    "size": 279040,
+    "sha256": "B62A0F2B74F2D6C436B90B58A5B122B5FAC7935A9A6B03A44F51227569FFDACE",
+    "for_wechat": "4.1.10.27",
+    "purpose": "离线解密回填时采集 SQLCipher 密钥；日常抓消息不需要它"
+  }
+}

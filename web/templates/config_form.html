@@ -1,0 +1,350 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>总设置</h2>
+
+<p class="hint">
+    按项调整参数即可，<b>配置文件由应用自动生成</b>（你不需要看 JSON/YAML）。
+    每项都标了「影响」和「建议」。保存时会校验，并自动备份一份
+    <code>config.yaml.bak-&lt;时间戳&gt;</code>。改完点最下面<b>保存全部设置</b>。
+</p>
+
+{% if saved %}
+<div class="card" style="border-left:4px solid #27ae60; background:#eafaf1">
+    <b>✅ 已保存</b>，配置已写入 <code>{{ config_path }}</code>。
+    多数改动要<b>重启 app</b> 才完全生效（评分/自动回复/归档时间等）。
+</div>
+{% endif %}
+{% if error %}
+<div class="card" style="border-left:4px solid #e74c3c; background:#fdecea">
+    <b>❌ 没保存：</b>{{ error }}
+    <div class="hint" style="margin-top:6px">修正上面提示的那一项后再点保存（其它项不会丢）。</div>
+</div>
+{% endif %}
+
+<div class="card" style="background:#eaf4ff">
+    <b>只调大模型？</b> 用 <a href="{{ url_for('llm_page') }}">🧠 大模型设置</a>（表单 + 「测试连接」，更快）。
+    <b>想直接改 JSON？</b> 用 <a href="{{ url_for('config_raw_index') }}">高级模式</a>。
+</div>
+
+{# 监控名单已挪到「监控规则」页（/filter）——避免两处都能改同一份配置 #}
+<div class="card" style="background:#f4fbf7; border-left:4px solid #27ae60">
+    <h3 style="margin-top:0">📋 监控名单 / 归档范围</h3>
+    <p class="hint" style="margin:0 0 8px">
+        <b>已挪到 <a href="{{ url_for('filter_page') }}">🎯 监控规则</a> 页</b>（下拉勾选群/人 + 每群选择重点关注人）。
+        那边同时决定 <b>23:30 归档与总结的范围</b>：
+        群没设重点关注人 → 整群归档；设了 → 只归档这些人的发言。
+    </p>
+    <div class="kv">
+        <div class="k">当前监控的群</div>
+        <div class="v">{{ group_rows|length }} 个{% if group_rows %}：{{ group_rows|map(attribute='name')|join('、') }}{% endif %}</div>
+        <div class="k">当前监控的人</div>
+        <div class="v">{{ sender_rows|length }} 个{% if sender_rows %}：{{ sender_rows|map(attribute='name')|join('、') }}{% endif %}</div>
+    </div>
+    <div style="margin-top:10px">
+        <a class="button" href="{{ url_for('filter_page') }}">去监控规则页设置 →</a>
+    </div>
+</div>
+
+<form method="POST" action="{{ url_for('config_save') }}">
+
+{# 监控名单已抽到 _monitor_block.html 并放在本表单**之外**（见上方 include）：
+   HTML 不允许 form 嵌套，否则内层 form 会被丢弃、点"添加"变成提交整份设置。 #}
+{% if false %}
+<div class="card" style="background:#f4fbf7; border-left:4px solid #27ae60">
+    <h3 style="margin-top:0">📋 监控名单（勾选即可，不用手写 id）</h3>
+    <p class="hint" style="margin:0 0 10px">
+        这里的勾选会写进 <code>filter.groups</code> / <code>filter.senders</code>（入库白名单），
+        <b>同时决定 23:30 归档的范围</b>：
+        <br>· 群在名单里、<b>没设重点关注人</b> → <b>整群归档 + 总结</b>
+        <br>· 群设了<b>重点关注人</b> → <b>只归档这些人的发言</b>（其他人不进归档）
+        <br>另：群的<b>敏感关键词</b>命中、<b>全局重点联系人</b>的发言，也会进归档（在标定页设置）。
+    </p>
+
+    <h4 style="margin:12px 0 6px">监控的群（{{ group_rows|length }} 个）</h4>
+    {% if group_rows %}
+    <table style="width:100%; font-size:13px; border-collapse:collapse">
+        <tr style="text-align:left; color:#7f8c8d">
+            <th style="padding:4px 6px">群</th>
+            <th style="padding:4px 6px">归档范围</th>
+            <th style="padding:4px 6px">重点关注的人</th>
+            <th style="padding:4px 6px">操作</th>
+        </tr>
+        {% for g in group_rows %}
+        <tr style="border-top:1px solid #e8f0eb">
+            <td style="padding:6px">
+                <b>{{ g.name }}</b>
+                {% if g.name != g.id %}<div class="hint" style="margin:0"><code style="font-size:11px">{{ g.id }}</code></div>{% endif %}
+            </td>
+            <td style="padding:6px">
+                {% if g.focus %}
+                    <span style="color:#e67e22">只归档 {{ g.focus|length }} 位重点关注人</span>
+                {% else %}
+                    <span style="color:#27ae60">整群归档</span>
+                    {% if g.keywords %}<span class="hint" style="display:block; margin:0">另有 {{ g.keywords }} 个敏感关键词会命中</span>{% endif %}
+                {% endif %}
+            </td>
+            <td style="padding:6px">
+                {% if g.focus %}
+                    {% for f in g.focus %}
+                    <span style="display:inline-block; background:#eaf4ff; border-radius:10px; padding:2px 8px; margin:2px 4px 2px 0">
+                        {{ f.name }}
+                        <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline">
+                            <input type="hidden" name="action" value="focus_remove">
+                            <input type="hidden" name="group" value="{{ g.id }}">
+                            <input type="hidden" name="sender" value="{{ f.id }}">
+                            <button type="submit" class="secondary" style="padding:0 5px; font-size:11px; border:none; background:none; color:#e74c3c; cursor:pointer">✕</button>
+                        </form>
+                    </span>
+                    {% endfor %}
+                {% else %}
+                    <span class="muted">未设置（整群归档）</span>
+                {% endif %}
+            </td>
+            <td style="padding:6px; white-space:nowrap">
+                <a class="button secondary" style="padding:3px 10px; font-size:12px"
+                   href="{{ url_for('config_focus_page', gid=g.id) }}">👥 选择重点人</a>
+                <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline">
+                    <input type="hidden" name="action" value="remove_group">
+                    <input type="hidden" name="group" value="{{ g.id }}">
+                    <button type="submit" class="secondary" style="padding:3px 10px; font-size:12px">移除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p class="empty" style="margin:0">还没监控任何群 —— 用下面的下拉框添加（留空 = 所有会话都抓，且归档按标定页规则走）</p>
+    {% endif %}
+
+    <form method="POST" action="{{ url_for('config_filter_save') }}" style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <input type="hidden" name="action" value="add_group">
+        <select name="group" style="min-width:320px">
+            <option value="">— 选择要监控的群（已标定的显示名字）—</option>
+            {% for g in all_groups %}
+                {% if g.id not in mon_groups %}<option value="{{ g.id }}">{{ g.name }}{% if g.name != g.id %}（{{ g.id }}）{% endif %}</option>{% endif %}
+            {% endfor %}
+        </select>
+        <button type="submit">➕ 添加</button>
+    </form>
+
+    <h4 style="margin:16px 0 6px">监控的人（{{ sender_rows|length }} 个）</h4>
+    {% if sender_rows %}
+    <div>
+        {% for s in sender_rows %}
+        <span style="display:inline-block; background:#eaf4ff; border-radius:10px; padding:3px 9px; margin:3px 5px 3px 0; font-size:13px">
+            {{ s.name }}
+            <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline">
+                <input type="hidden" name="action" value="remove_sender">
+                <input type="hidden" name="sender" value="{{ s.id }}">
+                <button type="submit" class="secondary" style="padding:0 5px; font-size:11px; border:none; background:none; color:#e74c3c; cursor:pointer">✕</button>
+            </form>
+        </span>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty" style="margin:0">还没监控任何人</p>
+    {% endif %}
+
+    <form method="POST" action="{{ url_for('config_filter_save') }}" style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <input type="hidden" name="action" value="add_sender">
+        <select name="sender" style="min-width:320px">
+            <option value="">— 选择要监控的人（已标定的显示名字）—</option>
+            {% for s in all_senders %}
+                {% if s.id not in mon_senders %}<option value="{{ s.id }}">{{ s.name }}{% if s.name != s.id %}（{{ s.id }}）{% endif %}</option>{% endif %}
+            {% endfor %}
+        </select>
+        <button type="submit">➕ 添加</button>
+    </form>
+    <p class="hint" style="margin-top:8px">
+        名单为空 = 不限制（所有会话都抓）。名单里的群/人在标定页会显示
+        <code>"monitored": true</code> 标记；标定页的<b>每群敏感关键词</b>仍然生效。
+    </p>
+</div>
+{% endif %}
+
+{% for sec in sections %}
+<div class="card">
+    <h3 style="margin-top:0">{{ sec.title }} <code style="font-size:12px">{{ sec.key }}</code></h3>
+    {% if sec.note %}<p class="hint" style="margin:0 0 10px">{{ sec.note }}</p>{% endif %}
+
+    {% for f in sec.fields %}
+    <div class="form-row" style="border-top:1px solid #ecf0f1; padding-top:10px">
+        <label style="display:block; font-weight:600; margin-bottom:4px">
+            {{ f.label }}
+            {% if f.kind == 'bool' %}
+                <input type="checkbox" name="{{ f.name }}" {% if f.value %}checked{% endif %}
+                       style="transform:scale(1.2); margin-left:6px">
+            {% endif %}
+        </label>
+
+        {% if f.kind == 'bool' %}
+            {# 复选框已在 label 里 #}
+        {% elif f.kind == 'number' %}
+            <input type="number" name="{{ f.name }}" value="{{ f.value }}"
+                   {% if f.min is defined %}min="{{ f.min }}"{% endif %}
+                   {% if f.max is defined %}max="{{ f.max }}"{% endif %}
+                   {% if f.step is defined %}step="{{ f.step }}"{% endif %}
+                   style="width:120px">
+        {% elif f.kind == 'password' %}
+            <input type="password" name="{{ f.name }}" value=""
+                   placeholder="{{ ('已保存 ' + f.key_hint + '，留空 = 不修改') if f.key_saved else '（未设置）' }}"
+                   style="width:340px">
+            {% if f.key_saved %}
+                <label style="display:inline-block; margin-left:10px; font-size:12px">
+                    <input type="checkbox" name="{{ f.name }}__clear"> 清空
+                </label>
+            {% endif %}
+        {% elif f.kind == 'time' %}
+            <input type="time" name="{{ f.name }}" value="{{ f.value }}">
+        {% elif f.kind == 'select' %}
+            <select name="{{ f.name }}" style="min-width:340px">
+                {% for val, txt in f.options %}
+                <option value="{{ val }}" {% if f.value == val %}selected{% endif %}>{{ txt }}</option>
+                {% endfor %}
+            </select>
+        {% elif f.kind in ('list', 'textarea', 'overrides') %}
+            <textarea name="{{ f.name }}" rows="{{ 4 if f.kind == 'list' else 3 }}"
+                      style="width:100%; font-size:13px"
+                      {% if f.kind == 'overrides' %}placeholder="每行一个：md5=显示名"{% endif %}>{{ f.value }}</textarea>
+        {% elif f.kind in ('typecheck', 'typelist') %}
+            <div style="display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:4px">
+                {% for o in f.options %}
+                <label style="font-size:13px; font-weight:400">
+                    <input type="checkbox" name="{{ f.name }}" value="{{ o.v }}"
+                           {% if o.on %}checked{% endif %}
+                           {% if o.v == 47 and f.kind == 'typecheck' %}disabled checked{% endif %}>
+                    {{ o.t }} <code style="font-size:11px">{{ o.v }}</code>
+                </label>
+                {% endfor %}
+            </div>
+        {% else %}
+            <input type="text" name="{{ f.name }}" value="{{ f.value }}" style="width:100%">
+        {% endif %}
+
+        {% if f.impact %}<div class="hint" style="margin-top:4px">影响：{{ f.impact }}</div>{% endif %}
+        {% if f.suggest %}<div class="hint" style="color:#16a085">建议：{{ f.suggest }}</div>{% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+
+{# ---------- 自动回复：全局项 + 每个模板一套字段 ---------- #}
+{% if reply %}
+<div class="card">
+    <h3 style="margin-top:0">{{ reply.title }} <code style="font-size:12px">replies</code></h3>
+    <p class="hint" style="margin:0 0 10px">{{ reply.note }}</p>
+
+    {% for f in reply_fields %}
+    <div class="form-row" style="border-top:1px solid #ecf0f1; padding-top:10px">
+        <label style="display:block; font-weight:600; margin-bottom:4px">
+            {{ f.label }}
+            {% if f.kind == 'bool' %}
+                <input type="checkbox" name="{{ f.name }}" {% if f.value %}checked{% endif %}
+                       style="transform:scale(1.2); margin-left:6px">
+            {% endif %}
+        </label>
+        {% if f.kind == 'number' %}
+            <input type="number" name="{{ f.name }}" value="{{ f.value }}" style="width:120px">
+        {% elif f.kind == 'bool' %}
+        {% else %}
+            <input type="text" name="{{ f.name }}" value="{{ f.value }}" style="width:100%">
+        {% endif %}
+        {% if f.impact %}<div class="hint" style="margin-top:4px">影响：{{ f.impact }}</div>{% endif %}
+        {% if f.suggest %}<div class="hint" style="color:#16a085">建议：{{ f.suggest }}</div>{% endif %}
+    </div>
+    {% endfor %}
+
+    <h4 style="margin:16px 0 6px">回复模板（{{ tpl_blocks|length }} 个）</h4>
+    <div id="tpl-list">
+    {% for tb in tpl_blocks %}
+        <div class="tpl-block" style="border:1px solid #dfe6e9; border-radius:6px; padding:12px; margin-bottom:12px; background:#fafbfc">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
+                <b>模板 {{ tb.index + 1 }}：{{ tb.name }}</b>
+                <label style="font-size:12px; color:#e74c3c">
+                    <input type="checkbox" name="tpl_{{ tb.index }}__delete"> 删除这个模板
+                </label>
+            </div>
+            {% for f in tb.fields %}
+            <div class="form-row" style="margin-bottom:8px">
+                <label style="display:block; font-weight:600; margin-bottom:2px">
+                    {{ f.label }}
+                    {% if f.kind == 'bool' %}
+                        <input type="checkbox" name="{{ f.name }}" {% if f.value %}checked{% endif %}
+                               style="transform:scale(1.2); margin-left:6px">
+                    {% endif %}
+                </label>
+                {% if f.kind == 'bool' %}
+                {% elif f.kind == 'select' %}
+                    <select name="{{ f.name }}" style="width:240px">
+                        {% for val, txt in f.options %}
+                        <option value="{{ val }}" {% if f.value == val %}selected{% endif %}>{{ txt }}</option>
+                        {% endfor %}
+                    </select>
+                {% elif f.kind == 'textarea' %}
+                    <textarea name="{{ f.name }}" rows="3" style="width:100%; font-size:13px">{{ f.value }}</textarea>
+                {% elif f.kind == 'list' %}
+                    <textarea name="{{ f.name }}" rows="2" style="width:100%; font-size:13px"
+                              placeholder="每行一个">{{ f.value }}</textarea>
+                {% else %}
+                    <input type="text" name="{{ f.name }}" value="{{ f.value }}" style="width:100%">
+                {% endif %}
+                {% if f.impact %}<div class="hint" style="margin-top:2px">影响：{{ f.impact }}</div>{% endif %}
+                {% if f.suggest %}<div class="hint" style="color:#16a085">建议：{{ f.suggest }}</div>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    {% endfor %}
+    </div>
+
+    <button type="button" class="secondary" id="btn-add-tpl">➕ 新增一个模板</button>
+    <p class="hint" style="margin-top:6px">
+        新增模板请先勾「只测试不真发」，确认规则没问题再取消勾选。
+        删除是勾上面的「删除这个模板」，保存后生效。
+    </p>
+</div>
+{% endif %}
+
+<div class="card" style="position:sticky; bottom:0; display:flex; gap:10px; align-items:center">
+    <button type="submit">💾 保存全部设置</button>
+    <span class="muted" style="font-size:12px">配置文件：<code>{{ config_path }}</code>（保存前自动备份）</span>
+</div>
+</form>
+
+<script>
+// 新增模板：在 DOM 里克隆最后一块（或按空值新建），索引顺延。
+(function () {
+    var list = document.getElementById('tpl-list');
+    var btn = document.getElementById('btn-add-tpl');
+    if (!list || !btn) return;
+    var nextIndex = {{ tpl_blocks|length }};
+    btn.addEventListener('click', function () {
+        var blocks = list.querySelectorAll('.tpl-block');
+        var node;
+        if (blocks.length) {
+            node = blocks[blocks.length - 1].cloneNode(true);
+            // 清空输入值，并把 name 里的索引改成新的
+            node.querySelectorAll('input, textarea, select').forEach(function (el) {
+                if (el.type === 'checkbox') { el.checked = false; }
+                else if (el.tagName === 'SELECT') { el.selectedIndex = 0; }
+                else { el.value = ''; }
+                if (el.name) { el.name = el.name.replace(/tpl_\d+__/, 'tpl_' + nextIndex + '__'); }
+            });
+            var t = node.querySelector('b');
+            if (t) t.textContent = '模板 ' + (nextIndex + 1) + '：（新模板）';
+        } else {
+            node = document.createElement('div');
+            node.className = 'tpl-block';
+            node.style.cssText = 'border:1px solid #dfe6e9;border-radius:6px;padding:12px;margin-bottom:12px;background:#fafbfc';
+            node.innerHTML = '<b>模板 ' + (nextIndex + 1) + '：（新模板）</b>'
+                + '<div class="form-row" style="margin-top:8px"><label style="font-weight:600">触发词</label>'
+                + '<input type="text" name="tpl_' + nextIndex + '__trigger" style="width:100%"></div>'
+                + '<div class="form-row"><label style="font-weight:600">回复内容 / 人设</label>'
+                + '<textarea name="tpl_' + nextIndex + '__response" rows="3" style="width:100%"></textarea></div>'
+                + '<label style="font-size:13px"><input type="checkbox" name="tpl_' + nextIndex + '__test_only" checked> 只测试不真发</label>';
+        }
+        list.appendChild(node);
+        nextIndex += 1;
+    });
+})();
+</script>
+{% endblock %}

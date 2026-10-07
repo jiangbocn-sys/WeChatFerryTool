@@ -27,6 +27,128 @@
 })();
 </script>
 
+{% set st = app_state or {} %}
+{% set st = app_state or {} %}
+{% if st.uninitialized %}
+<div class="card" style="border-left:4px solid #f39c12">
+    <h3 style="margin:0 0 6px;color:#f39c12">⚠️ 尚未初始化</h3>
+    <p style="margin:0">
+        当前处于<b>待初始化</b>状态：不抓取消息、不采集密钥、不自动回复、也不会启动微信。
+        <a href="/setup" style="font-weight:600">前往初始化设置 →</a>
+    </p>
+</div>
+{% endif %}
+<div class="card" id="app-card">
+    <h3 style="margin:0 0 10px; display:flex; align-items:center; justify-content:space-between">
+        <span>应用状态</span>
+        <span class="tag" id="app-badge">—</span>
+    </h3>
+    <div class="kv">
+        <div class="k">抓取模式</div><div class="v" id="app-mode">—</div>
+        <div class="k">微信进程</div><div class="v" id="app-wechat">—</div>
+        <div class="k">DLL / 回调</div><div class="v" id="app-dll">—</div>
+        <div class="k">keyhook 注入</div><div class="v" id="app-keyhook">—</div>
+        <div class="k">自动回复</div><div class="v" id="app-replies">—</div>
+    </div>
+    <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap">
+        <button id="btn-replies">开启自动回复</button>
+        <button id="btn-pause" class="secondary">暂停抓取</button>
+        <button id="btn-restore" class="secondary">完全恢复</button>
+        <button id="btn-quit" class="danger">退出 app</button>
+    </div>
+    <p class="muted" id="app-hint" style="margin:10px 0 0; font-size:12px"></p>
+</div>
+
+<script>
+(function () {
+    var cur = {};
+    function $(id) { return document.getElementById(id); }
+
+    function render(st) {
+        cur = st || {};
+        var badge = $('app-badge');
+        if (!cur.running) {
+            badge.textContent = cur.stale ? 'app 已停止（状态过期）' : 'app 未运行';
+            badge.style.background = '#95a5a6';
+        } else if (cur.paused) {
+            badge.textContent = '已暂停抓取';
+            badge.style.background = '#f39c12';
+        } else {
+            badge.textContent = '运行中';
+            badge.style.background = '#27ae60';
+        }
+
+        $('app-mode').innerHTML =
+            cur.capture_mode === 'capture'
+                ? '<span style="color:#27ae60">抓取模式</span>（version.dll 在位）'
+                : cur.capture_mode === 'normal'
+                    ? '<span style="color:#e74c3c">原始模式</span>（hook 已移除，抓不到消息）'
+                    : '<span style="color:#f39c12">未知</span>';
+
+        $('app-wechat').textContent = cur.wechat_running
+            ? ('运行中（PID ' + cur.wechat_pid + '）') : '未运行';
+
+        $('app-dll').textContent = cur.dll_api_ready
+            ? ('在线 · 回调 ' + (cur.callback_url || '未注册')) : '离线';
+
+        $('app-keyhook').textContent = cur.keyhook_injected_pid
+            ? ('已注入（PID ' + cur.keyhook_injected_pid + '）')
+            : '未注入（只有采密钥时才需要）';
+
+        $('app-replies').innerHTML = cur.replies_enabled
+            ? '<span style="color:#e74c3c">已开启（封号风险）</span>'
+            : '<span style="color:#7f8c8d">关闭</span>';
+
+        $('btn-replies').textContent = cur.replies_enabled ? '关闭自动回复' : '开启自动回复';
+        $('btn-pause').textContent = cur.paused ? '恢复抓取' : '暂停抓取';
+
+        var ctl = !!cur.controllable;
+        ['btn-replies', 'btn-pause', 'btn-restore', 'btn-quit'].forEach(function (id) {
+            $(id).disabled = !ctl;
+        });
+        $('app-hint').textContent = ctl
+            ? '控制立即生效（自动回复开关不需要重启）。'
+            : (cur.source === 'file'
+                ? '本 Web 是独立进程，只能查看状态。要从界面控制，请用 run_app.pyw 启动。'
+                : 'app 未运行。启动 app 后这里可直接操作。');
+    }
+
+    function refresh() {
+        fetch('/api/app', { cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(render)
+            .catch(function () {});
+    }
+
+    function control(action, value) {
+        if (action === 'restore' &&
+            !confirm('将关闭微信、移除 hook，然后以原始状态重启微信。继续？')) return;
+        if (action === 'quit' &&
+            !confirm('退出 app：停止抓取，微信保持运行。继续？')) return;
+        fetch('/api/app/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action, value: value })
+        }).then(function (r) { return r.json(); })
+          .then(function (j) {
+              if (!j.ok) alert(j.error || '操作失败');
+              refresh();
+          })
+          .catch(function (e) { alert('请求失败: ' + e); });
+    }
+
+    // 先用服务端渲染的初始状态画一次，避免闪烁
+    render({{ (app_state or {}) | tojson }});
+
+    $('btn-replies').addEventListener('click', function () { control('replies', !cur.replies_enabled); });
+    $('btn-pause').addEventListener('click', function () { control('pause', !cur.paused); });
+    $('btn-restore').addEventListener('click', function () { control('restore'); });
+    $('btn-quit').addEventListener('click', function () { control('quit'); });
+
+    setInterval(refresh, 5000);
+})();
+</script>
+
 <div class="stat-grid">
     <div class="stat">
         <div class="label">消息总数</div>
@@ -66,10 +188,10 @@
                 <td class="muted" style="white-space:nowrap">{{ r.ts }}</td>
                 <td>
                     {{ r.group_label }}
-                    {% if r.priority >= 1 %}<span class="tag important">★</span>{% endif %}
+                    {% if (r.priority or 0) >= 1 %}<span class="tag important">★</span>{% endif %}
                 </td>
                 <td>{{ r.sender_label }}</td>
-                <td>{{ r.preview }}{% if r.preview|length >= 80 %}…{% endif %}</td>
+                <td>{{ r.preview }}{% if (r.preview or '')|length >= 80 %}…{% endif %}</td>
                 <td>
                     {% if r.score is none %}<span class="muted">—</span>
                     {% elif r.score >= 4 %}<span class="tag score-high">{{ r.score }}</span>
@@ -87,16 +209,30 @@
 
 <div class="card">
     <h3>当前生效配置</h3>
+    {# 待初始化时 cfg 是空 dict：这里一律用 (cfg.get('x') or {}) 取，别写 cfg.hook ——
+       Jinja 的默认 Undefined 一取属性就抛 UndefinedError，整页 500。 #}
+    {% set hook = (cfg.get('hook') or {}) %}
+    {% set llm = (cfg.get('llm') or {}) %}
+    {% set flt = (cfg.get('filter') or {}) %}
     <div class="kv">
-        <div class="k">daemon URL</div><div class="v">{{ cfg.hook.api_base if cfg.hook else '—' }}</div>
-        <div class="k">callback</div><div class="v">http://{{ cfg.hook.callback_host if cfg.hook else '—' }}:{{ cfg.hook.callback_port if cfg.hook else '—' }}</div>
-        <div class="k">self_wxid</div><div class="v">{{ cfg.hook.self_wxid or '(未配置)' }}</div>
-        <div class="k">LLM</div><div class="v">{{ cfg.llm.model if cfg.llm else '—' }} @ {{ cfg.llm.base_url if cfg.llm else '—' }}</div>
-        <div class="k">push_threshold</div><div class="v">{{ cfg.llm.push_threshold if cfg.llm else '—' }}</div>
-        <div class="k">filter.groups</div><div class="v">{% if cfg.filter and cfg.filter.groups %}{{ cfg.filter.groups|length }} 个{% else %}<span style="color:#27ae60">🌐 全部</span>{% endif %}</div>
-        <div class="k">filter.senders</div><div class="v">{% if cfg.filter and cfg.filter.senders %}{{ cfg.filter.senders|length }} 个{% else %}<span style="color:#27ae60">🌐 全部</span>{% endif %}</div>
-        <div class="k">filter.keywords</div><div class="v">{% if cfg.filter and cfg.filter.keywords %}{{ cfg.filter.keywords|length }} 个{% else %}<span style="color:#f39c12">⚠️ 全部</span>{% endif %}</div>
+        <div class="k">daemon URL</div><div class="v">{{ hook.get('api_base') or '—' }}</div>
+        <div class="k">callback</div>
+        <div class="v">{% if hook.get('callback_host') %}http://{{ hook.get('callback_host') }}:{{ hook.get('callback_port') }}{% else %}—{% endif %}</div>
+        <div class="k">self_wxid</div><div class="v">{{ hook.get('self_wxid') or '(未配置)' }}</div>
+        <div class="k">LLM</div><div class="v">{{ llm.get('model') or '—' }} @ {{ llm.get('base_url') or '—' }}</div>
+        <div class="k">push_threshold</div><div class="v">{{ llm.get('push_threshold') if llm.get('push_threshold') is not none else '—' }}</div>
+        <div class="k">filter.groups</div><div class="v">{% if flt.get('groups') %}{{ flt.get('groups')|length }} 个{% else %}<span style="color:#27ae60">🌐 全部</span>{% endif %}</div>
+        <div class="k">filter.senders</div><div class="v">{% if flt.get('senders') %}{{ flt.get('senders')|length }} 个{% else %}<span style="color:#27ae60">🌐 全部</span>{% endif %}</div>
+        <div class="k">filter.keywords</div><div class="v">{% if flt.get('keywords') %}{{ flt.get('keywords')|length }} 个{% else %}<span style="color:#f39c12">⚠️ 全部</span>{% endif %}</div>
+        <div class="k">入库排除类型</div>
+        <div class="v">{{ ((cfg.get('storage') or {}).get('ingest_exclude_types') or [47])|join(', ') }}
+            <a href="{{ url_for('settings_page') }}" style="font-size:12px">（改）</a></div>
     </div>
+    {% if not cfg %}
+    <p class="hint" style="margin:10px 0 0">
+        还没有配置文件 —— 当前是<b>待初始化</b>状态。<a href="/setup" style="font-weight:600">前往初始化向导 →</a>
+    </p>
+    {% endif %}
 </div>
 
 {% endblock %}

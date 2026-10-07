@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>消息分类（入库闸门）</h2>
+
+<p class="hint">
+    勾选 = 这类消息 <b>不进数据库</b>。这是<b>入库</b>闸门，和「标定」页决定<b>进不进当日归档</b>是两件事：
+    没入库的消息，归档和总结也看不到。
+</p>
+
+<div class="warn">
+    <strong>表情恒不入库</strong>：<code>msg_type=47</code> 在代码层被强制排除，本页无法取消勾选 ——
+    否则表情会混进当日归档。写进 <code>config.yaml</code> 的
+    <code>storage.ingest_exclude_types</code> 里也一定带着 47。
+</div>
+
+<div class="card" style="background:#eaf4ff">
+    <h3 style="margin-top:0">📊 当前生效</h3>
+    <div class="kv">
+        <div class="k">不进库的分类</div>
+        <div class="v">
+            <strong>{{ n_excluded }} 类</strong>：<code>{{ excluded|join('</code> <code>') }}</code>
+        </div>
+        <div class="k">生效方式</div>
+        <div class="v">
+            保存后写进 <code>storage.ingest_exclude_types</code>；consumer 在<b>下一条消息</b>就按新配置判断，
+            不需要重启（本页改动不影响已经入库的历史消息）。
+        </div>
+    </div>
+</div>
+
+<form method="POST" action="{{ url_for('settings_update') }}">
+<div class="card">
+    <h3 style="margin-top:0">分类明细 <span class="muted" style="font-size:12px">（按消息量排序；取消全选即"只挡表情"）</span></h3>
+    <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+        <button type="button" class="secondary" onclick="preset('recommended')">推荐：只挡表情+系统+撤回</button>
+        <button type="button" class="secondary" onclick="preset('all')">全选（最省空间）</button>
+        <button type="button" class="secondary" onclick="preset('none')">全不选（除表情外都入库）</button>
+        <button type="button" class="secondary" onclick="preset('text')">只留文本+链接+语音</button>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th style="width:70px">挡?</th>
+                <th style="width:64px">type</th>
+                <th style="width:110px">分类</th>
+                <th>说明</th>
+                <th style="width:90px">已入库</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in type_rows %}
+            <tr {% if r.selected %}style="background:#fff8e1"{% endif %}>
+                <td>
+                    <input type="checkbox" name="exclude_types" value="{{ r.type }}"
+                           {% if r.selected %}checked{% endif %}>
+                </td>
+                <td><code>{{ r.type }}</code></td>
+                <td>
+                    {{ r.label }}
+                    {% if r.is_system %}<span class="tag">系统类</span>{% endif %}
+                </td>
+                <td class="muted" style="font-size:12px">{{ r.descr }}</td>
+                <td class="muted">{{ r.count }}</td>
+            </tr>
+        {% endfor %}
+            <tr style="background:#f4f6f8">
+                <td><input type="checkbox" checked disabled></td>
+                <td><code>{{ forced.type }}</code></td>
+                <td>{{ forced.label }} <span class="tag important">恒排除</span></td>
+                <td class="muted" style="font-size:12px">{{ forced.descr }}</td>
+                <td class="muted">{{ forced.count }}</td>
+            </tr>
+        </tbody>
+    </table>
+    <p class="hint" style="margin-top:8px">
+        表格里只列常见分类。数据库里出现过的其他类型：
+        {% if db_types %}
+            {% for d in db_types %}<code>{{ d.type }}</code>{% if d.label %}（{{ d.label }}）{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}
+            —— 这些类型没有对应开关，默认<b>照常入库</b>（想挡就在 <code>config.yaml</code> 里手工加）。
+        {% else %}
+            无。
+        {% endif %}
+    </p>
+</div>
+
+<button type="submit">💾 保存</button>
+</form>
+
+{# ---------- 数据清理（R-001） ----------
+   注意：本区块的表单必须放在上面那个表单**之外**（HTML 不允许 form 嵌套）。 #}
+<h2 style="margin-top:26px">🗄 数据清理（消息库按期自动清理）</h2>
+
+{% if cleanup_saved %}
+<div class="card" style="border-left:4px solid #27ae60; background:#eafaf1">
+    <b>✅ {{ cleanup_saved }}</b>
+</div>
+{% endif %}
+{% if cleanup_error %}
+<div class="card" style="border-left:4px solid #e74c3c; background:#fdecea">
+    <b>❌ {{ cleanup_error }}</b>
+</div>
+{% endif %}
+
+<p class="hint">
+    超过<b>保留天数</b>的消息会被<b>真正删除</b>（不可恢复）。清理在后台<b>静默</b>进行：
+    只写日志、不弹窗、不打断抓取；<b>当天的消息永远不会被删</b>。
+    已经生成的归档 Markdown（<code>reports\*.md</code>）、标定、联系人缓存都<b>不受影响</b>。
+</p>
+
+<div class="card" style="background:#eaf4ff">
+    <h3 style="margin-top:0">📊 当前生效</h3>
+    <div class="kv">
+        <div class="k">自动清理</div>
+        <div class="v">
+            {% if cleanup.days == 0 %}
+                <b>未启用</b>（保留天数 = 0）—— 不会删除任何消息。
+            {% elif cleanup.days < cleanup.min_days %}
+                <b style="color:#e67e22">不会执行</b>：保留 {{ cleanup.days }} 天小于下限
+                {{ cleanup.min_days }} 天。
+            {% elif not cleanup.auto %}
+                <b>未启用</b>（保留 {{ cleanup.days }} 天，但「启用自动清理」没勾）。
+            {% else %}
+                <b style="color:#27ae60">已启用</b>：每天 <code>{{ cleanup.time }}</code> 之后清理一次，
+                保留最近 <b>{{ cleanup.days }}</b> 天（{{ cleanup.cutoff }} 之前的记录会被删）。
+            {% endif %}
+        </div>
+        <div class="k">清理时机</div>
+        <div class="v">
+            需要 app 一直开着；每天最多跑一次（状态记在 <code>data\cleanup_state.json</code>）。
+            {% if cleanup.vacuum %}顺带 VACUUM 回收磁盘空间（较慢、持锁较久）。{% else %}删完只做
+            <code>wal_checkpoint(TRUNCATE)</code> 收缩 WAL；文件大小不一定立刻变小。{% endif %}
+        </div>
+        <div class="k">消息库</div>
+        <div class="v">
+            <code>{{ cleanup.db_path }}</code>
+            {% if not cleanup.db_exists %}（<b>不存在</b>）{% endif %}
+            {% if cleanup.total is not none %}
+                · 当前共 <b>{{ cleanup.total }}</b> 条
+            {% elif cleanup.db_exists %}
+                · 库里还没有 messages 表（全新库）
+            {% else %}
+                · 还没有这个库文件
+            {% endif %}
+        </div>
+        <div class="k">上次清理</div>
+        <div class="v">
+            {% if cleanup.last_at_str %}
+                {{ cleanup.last_at_str }}（保留 {{ cleanup.last_days }} 天，
+                删除 <b>{{ cleanup.last_deleted }}</b> 条）{% if cleanup.last_vacuumed %}，含 VACUUM{% endif %}
+            {% else %}
+                还没有清理过。
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h3 style="margin-top:0">⚙️ 设置（保存入口在「⚙️ 总设置」页）</h3>
+    <p class="hint" style="margin:0 0 8px">
+        三项都在总设置页的「数据清理」区块：
+        <b>保留最近多少天的消息</b>（0 = 不清理，建议 90）、<b>启用自动清理</b>、<b>每天几点清理</b>（默认 00:00）。
+    </p>
+    <a class="button" href="{{ url_for('config_page') }}">去总设置页改这三项 →</a>
+</div>
+
+<div class="card">
+    <h3 style="margin-top:0">🧪 先预览，再决定（不会删数据）</h3>
+    <p class="hint" style="margin:0 0 10px">
+        按当前保留天数（<b>{{ cleanup.days }}</b> 天）统计：
+        {% if cleanup.preview is not none and cleanup.preview >= 0 %}
+            将删除 <b>{{ cleanup.preview }}</b> 条，保留 {{ (cleanup.total or 0) - cleanup.preview }} 条。
+        {% elif cleanup.days == 0 %}
+            未设置保留天数，无法预览。
+        {% else %}
+            读不到消息库，无法预览。
+        {% endif %}
+    </p>
+    <form method="POST" action="{{ url_for('settings_cleanup') }}" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
+        <input type="hidden" name="mode" value="dry_run">
+        <button type="submit" class="secondary">🔍 预演一次（只报数）</button>
+    </form>
+</div>
+
+<div class="card" style="border-left:4px solid #e67e22">
+    <h3 style="margin-top:0">🧹 立即清理一次</h3>
+    <p class="hint" style="margin:0 0 10px">
+        ⚠️ <b>真删</b>：删除早于保留门槛（{{ cleanup.cutoff or '（未设置保留天数）' }}）的消息，<b>不可恢复</b>。
+        已生成的归档 Markdown 不会被删。建议先点上面的「预演一次」看条数。
+    </p>
+    <form method="POST" action="{{ url_for('settings_cleanup') }}"
+          onsubmit="return confirm('确定立即删除超过 {{ cleanup.days }} 天的消息吗？此操作不可恢复。');"
+          style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
+        <input type="hidden" name="mode" value="run">
+        {% if cleanup.days < cleanup.min_days %}
+            <button type="submit" disabled title="保留天数必须 ≥ {{ cleanup.min_days }}">🧹 立即清理一次</button>
+            <span class="muted">保留天数需要 ≥ {{ cleanup.min_days }} 天才能清理</span>
+        {% else %}
+            <button type="submit">🧹 立即清理一次</button>
+            <label style="font-size:13px"><input type="checkbox" name="vacuum"> 顺带 VACUUM 回收磁盘</label>
+        {% endif %}
+    </form>
+</div>
+
+<script>
+function preset(name) {
+    var boxes = document.querySelectorAll('input[name="exclude_types"]');
+    var want = {
+        // 推荐：只挡表情(47，本来就灰着) + 系统(51/10000) + 撤回(10002)
+        recommended: [47, 51, 10000, 10002],
+        all: null,                                    // 全选
+        none: [47],                                   // 除表情外都入库
+        text: [3, 42, 43, 47, 48, 49, 50, 51, 10000, 10002]  // 只留文本(1)+语音(34)+链接(49)
+    }[name];
+    boxes.forEach(function (b) {
+        var t = parseInt(b.value, 10);
+        b.checked = want ? (want.indexOf(t) >= 0) : true;
+    });
+}
+</script>
+{% endblock %}

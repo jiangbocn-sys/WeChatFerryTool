@@ -10,9 +10,13 @@
     <nav>
         <h1>WeChatFerryTool</h1>
         <a href="{{ url_for('dashboard') }}">📊 仪表盘</a>
+        <a href="{{ url_for('config_page') }}">⚙️ 总设置</a>
         <a href="{{ url_for('filter_page') }}">🎯 监控规则</a>
         <a href="{{ url_for('labels_page') }}">🏷 标定</a>
+        <a href="{{ url_for('digest_page') }}">📝 归档/总结</a>
+        <a href="{{ url_for('settings_page') }}">🧩 消息分类</a>
         <a href="{{ url_for('replies_page') }}">🤖 自动回复</a>
+        <a href="{{ url_for('llm_page') }}">🧠 大模型设置</a>
         <a href="{{ url_for('browse_page') }}">💬 消息浏览</a>
         <a href="{{ url_for('types_page') }}">🔬 类型分布</a>
     </nav>

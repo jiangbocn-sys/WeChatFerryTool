@@ -1,15 +1,47 @@
-.venv/
+# ---- 运行时/私有产物：绝不提交 ----
+# config.yaml 含真实 LLM API Key；备份与事故残留文件同理（config.yaml.bak-<ts> / .wizard-accident）
+config.yaml*
 data/
 logs/
-__pycache__/
-*.pyc
-config.yaml
-*.db
-
-# 运行时产物：含真实聊天记录与个人标识，仅保留在本地
 reports/
 STATUS.md
 .backups/
 
+# ---- 构建产物（体积大、可重建）----
+dist/
+build/
+*.spec
+
+# 微信安装包 228 MB：不进 git（需要时用 vendor/manifest.json 里的 sha256 重新下载）
+vendor/*.exe
+vendor/*.exe.sha256
+
+# accounts/ 保留跟踪（账号目录与 account.json 是"这套数据属于哪个账号"的元信息），
+# 但账号下的运行期数据/日志/报告/备份一律不进 git：
+accounts/*/data/
+accounts/*/logs/
+accounts/*/reports/
+accounts/*/config.yaml*
+accounts/*/*.bak-*
+accounts/*/*.db*
+accounts/*/*.log
+accounts/*/*.json.bak-*
+
+# ---- Python / 工具杂项 ----
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+
+# ---- 打包/测试残留 ----
+# 回归脚本用到的临时数据根（D:\projects\.wft-* 在仓库外，这里兜底）
+.wft-*/
+*.bak-*
+*.wizard-accident
+cli.out
+
+# ---- 编辑器 / 系统 ----
 .DS_Store
 Thumbs.db

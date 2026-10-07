@@ -2,7 +2,155 @@
 {% block content %}
 <h2>标定（显示名 + 重点关注）</h2>
 
-<p class="hint">给 wxid/roomid 起个名字，新消息进来时自动套用；勾选"★重点关注"的消息会自动打 priority=1。</p>
+<p class="hint">
+    给 wxid/roomid 起个名字，新消息进来时自动套用；勾选"★重点关注"的消息会自动打 priority=1。
+    下面的<b>重点成员</b>与<b>敏感关键词</b>决定这些群里的哪些发言会进<b>当日归档</b>与 LLM 总结。
+</p>
+
+<div class="card" style="background:#eaf4ff">
+    <b>不想一个个手工起名？</b> 昵称可以自动挖出来 —— 微信的<b>引用消息</b>里本来就带
+    <code>&lt;chatusr&gt;wxid&lt;/chatusr&gt;&lt;displayname&gt;名字&lt;/displayname&gt;</code>，
+    这些消息我们已经抓进库里了（不依赖 DLL、不需要解密）：
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <button type="button" id="btn-sync-names">🔄 从已抓消息挖昵称并套用</button>
+        <button type="button" class="secondary" id="btn-probe-names">🔍 只看能挖到多少</button>
+        <button type="button" id="btn-wechat-db">📥 从微信库导入昵称/群成员（离线）</button>
+        <span class="muted" id="sync-hint" style="font-size:12px"></span>
+    </div>
+    <div class="hint" style="margin-top:6px">
+        规则：<b>只填空白</b>——你手工改过的名字不会被覆盖；自动填的会标记 <code>"auto": true</code>。
+        库里出现过但还没标定的 wxid 也会一并建条目。挖不到的少数人，用下面的手工补充。
+        <br>「📥 从微信库导入」是**离线**读取微信的联系人库（含备注/昵称 + 每个群的成员），
+        <b>不注入、不启动、不碰微信进程</b>；需要源码侧依赖 <code>sqlcipher3</code>，
+        并要求 <code>文档\wechat-keys.jsonl</code> 里有可用的口令。
+        <label style="display:inline-block; margin-left:10px">
+            <input type="checkbox" id="wdb-overwrite" checked>
+            用微信库的名字<b>覆盖</b>已有标定名（原名存进 <code>name_prev</code> 可回退；不勾则只补空白）
+        </label>
+    </div>
+
+    <details style="margin-top:10px">
+        <summary style="cursor:pointer; font-weight:600">✍️ 手工批量补充 / 纠正（挖不到的用这个）</summary>
+        <div style="margin-top:8px">
+            <textarea id="override-text" rows="5" style="width:100%; font-size:13px"
+                      placeholder="每行一条，wxid 和昵称用空格/逗号/制表符分隔：&#10;wxid_xeoaxhl7qemf22 刘兴国&#10;wxid_n1042vq2wlju21,星星&#10;（也可以反过来写：刘兴国 wxid_xeoaxhl7qemf22）"></textarea>
+            <div style="margin-top:6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+                <button type="button" id="btn-save-overrides">💾 保存并套用</button>
+                <span class="muted" id="override-hint" style="font-size:12px"></span>
+            </div>
+            <div class="hint" style="margin-top:4px">
+                存到 <code>data/name_overrides.json</code>，**优先级高于自动挖掘** —— 手工纠正过的名字以后不会被挖出来的覆盖。
+            </div>
+        </div>
+    </details>
+</div>
+
+<script>
+(function () {
+    var btn = document.getElementById('btn-sync-names');
+    var probe = document.getElementById('btn-probe-names');
+    var hint = document.getElementById('sync-hint');
+    if (!btn) return;
+
+    function run(url, method, tag, payload) {
+        hint.style.color = '#7f8c8d';
+        hint.textContent = tag + '…';
+        btn.disabled = probe.disabled = true;
+        var opt = { method: method };
+        if (payload) {
+            opt.headers = { 'Content-Type': 'application/json' };
+            opt.body = JSON.stringify(payload);
+        }
+        fetch(url, opt).then(function (r) {
+            return r.text().then(function (t) {
+                try { return { ok: r.ok, j: JSON.parse(t) }; }
+                catch (e) { return { ok: false, j: null, raw: t.slice(0, 200) }; }
+            });
+        }).then(function (res) {
+            btn.disabled = probe.disabled = false;
+            var j = res.j;
+            if (!j) { hint.style.color = '#e74c3c'; hint.textContent = tag + '失败：' + (res.raw || ''); return; }
+
+            if (url.indexOf('harvest') >= 0) {          // 只统计
+                hint.style.color = j.ok ? '#27ae60' : '#e74c3c';
+                hint.textContent = j.ok
+                    ? '✅ 能挖到 ' + j.found + ' 个名字，例如：' + Object.keys(j.sample).slice(0, 4).map(function (k) {
+                        return j.sample[k]; }).join('、') + ' —— 点左边按钮套用'
+                    : '❌ 没挖到名字（消息里还没有引用消息？）';
+                return;
+            }
+            if (j.error) { hint.style.color = '#e74c3c'; hint.textContent = '❌ ' + j.error; return; }
+            var m = (j.sources || {}).messages || {};
+            hint.style.color = j.found ? '#27ae60' : '#f39c12';
+            hint.textContent = '找到 ' + j.found + ' 个名字：补上 ' + j.filled + ' / 新建 ' + j.created +
+                '（来源：消息挖掘 ' + (m.found || 0) + ' 个' +
+                (m.error ? '，出错 ' + m.error : '') + '）' + (j.found ? ' —— 刷新页面查看' : '');
+            if (j.found) setTimeout(function () { location.reload(); }, 1500);
+        }).catch(function (e) {
+            btn.disabled = probe.disabled = false;
+            hint.style.color = '#e74c3c';
+            hint.textContent = '请求失败：' + e;
+        });
+    }
+
+    btn.addEventListener('click', function () { run('/api/contacts/sync', 'POST', '正在挖掘昵称'); });
+    probe.addEventListener('click', function () { run('/api/contacts/harvest', 'GET', '正在统计'); });
+
+    // 离线导入微信库（昵称 + 群成员）：不注入、不启动、不碰微信进程
+    var wdb = document.getElementById('btn-wechat-db');
+    if (wdb) {
+        wdb.addEventListener('click', function () {
+            var ow = document.getElementById('wdb-overwrite');
+            var overwrite = !ow || ow.checked;
+            hint.style.color = '#7f8c8d';
+            hint.textContent = '正在离线读取微信联系人库（只读快照，可能需要几秒）…';
+            wdb.disabled = true;
+            fetch('/api/contacts/wechat-db', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ overwrite: overwrite })
+            })
+                .then(function (r) { return r.text().then(function (t) {
+                    try { return JSON.parse(t); } catch (e) { return { ok: false, error: t.slice(0, 200) }; } }); })
+                .then(function (j) {
+                    wdb.disabled = false;
+                    if (!j.ok) { hint.style.color = '#e74c3c'; hint.textContent = '❌ ' + (j.error || '失败'); return; }
+                    var c = j.counts || {};
+                    hint.style.color = '#27ae60';
+                    hint.textContent = '✅ 联系人 ' + (c.contacts || 0) + ' / 群 ' + (c.groups || 0) +
+                        ' / 群成员 ' + (c.members || 0) + '；标定补 ' + (j.filled || 0) +
+                        '、新建 ' + (j.created || 0) + '、覆盖 ' + (j.overwritten || 0) +
+                        '（跳过陌生人 ' + (j.skipped_unknown || 0) + '），正在刷新…';
+                    setTimeout(function () { location.reload(); }, 1500);
+                })
+                .catch(function (e) { wdb.disabled = false; hint.style.color = '#e74c3c'; hint.textContent = '请求失败：' + e; });
+        });
+    }
+
+    var ob = document.getElementById('btn-save-overrides');
+    var ot = document.getElementById('override-text');
+    var oh = document.getElementById('override-hint');
+    if (ob) {
+        ob.addEventListener('click', function () {
+            var text = (ot.value || '').trim();
+            if (!text) { oh.style.color = '#e74c3c'; oh.textContent = '先粘贴几行吧'; return; }
+            oh.style.color = '#7f8c8d';
+            oh.textContent = '正在解析并套用…';
+            fetch('/api/contacts/overrides', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text })
+            }).then(function (r) { return r.json(); }).then(function (j) {
+                if (!j.ok) { oh.style.color = '#e74c3c'; oh.textContent = '❌ ' + (j.error || '失败'); return; }
+                oh.style.color = '#27ae60';
+                oh.textContent = '✅ 解析 ' + j.parsed + ' 条，补上 ' + (j.applied.filled || 0) +
+                    ' / 新建 ' + (j.applied.created || 0) + '，正在刷新…';
+                setTimeout(function () { location.reload(); }, 1200);
+            }).catch(function (e) { oh.style.color = '#e74c3c'; oh.textContent = '请求失败：' + e; });
+        });
+    }
+})();
+</script>
 
 <form method="POST" action="{{ url_for('labels_save') }}">
 
@@ -11,37 +159,61 @@
     {% if labels.groups %}
         {% for k, v in labels.groups.items() %}
         {% set gi = loop.index0 %}
+        {% set focus_list = v.focus_members or [] %}
+        {% set kw_list = v.keywords or [] %}
+        {# 按数组顺序提交群 key：重点成员/关键词都按这个顺序对齐，避免条目多的群错位 #}
+        <input type="hidden" name="group_key" value="{{ k }}">
         <div class="label-row">
             <div class="wxid">{{ k }} {% if "@chatroom" not in k %}<span class="tag private">私聊</span>{% endif %}</div>
             <input type="text" name="labels[groups][{{ k }}]_name" value="{{ v.name }}" placeholder="显示名">
             <label><input type="checkbox" name="labels[groups][{{ k }}]_important" {% if v.important %}checked{% endif %}> ★</label>
             <div class="muted" style="font-size:11px">{{ v.name or "(未命名)" }}</div>
         </div>
-        {# —— 重点成员编辑器：勾选后，只有这些人的发言算"重点关注" —— #}
-        {% set focus_list = v.focus_members or [] %}
+        {# —— 重点成员：勾选后，只有这些人的发言算"重点关注" —— #}
         <details style="margin:2px 0 10px 12px">
             <summary style="cursor:pointer; font-size:12px; color:{{ '#f39c12' if focus_list else '#7f8c8d' }}">
                 重点成员{% if focus_list %}（已选 {{ focus_list|length }} 人）{% else %}（未设置 = 全群算重点）{% endif %}
             </summary>
             <div style="background:#f8f9fa; border-radius:4px; padding:8px; margin-top:6px">
                 {% if group_senders.get(k) %}
-                    {% for s in group_senders[k] %}
-                    <label style="display:inline-block; margin:2px 12px 2px 0; font-size:12px">
-                        <input type="checkbox" name="focus[{{ gi }}]" value="{{ s.wxid }}"
-                               {% if s.focus %}checked{% endif %}>
-                        {{ s.name or s.wxid }} <span class="muted">({{ s.count }})</span>
-                    </label>
-                    {% endfor %}
+                    <div class="muted" style="font-size:12px">该群发言最多的人（点名字复选框加入/移出重点成员）：</div>
+                    <div id="focus-box-{{ gi }}" style="margin:4px 0">
+                        {% for s in group_senders[k] %}
+                        <label style="display:inline-block; margin:2px 12px 2px 0; font-size:12px">
+                            <input type="checkbox" class="focus-ck" data-gi="{{ gi }}" value="{{ s.wxid }}"
+                                   {% if s.focus %}checked{% endif %}>
+                            {{ s.name or s.wxid }} <span class="muted">({{ s.count }})</span>
+                        </label>
+                        {% endfor %}
+                    </div>
                 {% else %}
                     <div class="muted" style="font-size:12px">该群暂无历史消息，无法列出成员</div>
                 {% endif %}
                 <div style="margin-top:6px">
-                    <textarea name="focus_extra[{{ gi }}]" rows="2"
-                              placeholder="其他成员 wxid，每行一个" style="width:100%; font-size:12px"></textarea>
+                    <label style="font-size:12px" class="muted">重点成员 wxid（每行一个，可写备注；与上面的勾选合并）</label>
+                    <textarea class="focus-ta" data-gi="{{ gi }}" rows="3"
+                              style="width:100%; font-size:12px"
+                              placeholder="wxid_xxx&#10;wxid_yyy">{{ focus_list|join('\n') }}</textarea>
                 </div>
             </div>
         </details>
-        <input type="hidden" name="focus_key[{{ gi }}]" value="{{ k }}">
+
+        {# —— 敏感关键词：命中即进当日归档（与重点成员是"或"的关系） —— #}
+        <details style="margin:2px 0 10px 12px">
+            <summary style="cursor:pointer; font-size:12px; color:{{ '#e67e22' if kw_list else '#7f8c8d' }}">
+                敏感关键词{% if kw_list %}（{{ kw_list|length }} 个）{% else %}（未设置）{% endif %}
+            </summary>
+            <div style="background:#fff8e1; border-radius:4px; padding:8px; margin-top:6px">
+                <textarea class="kw-ta" data-gi="{{ gi }}" rows="3"
+                          style="width:100%; font-size:12px"
+                          placeholder="报价&#10;合同&#10;付款&#10;# 以 # 开头整行是注释，不参与匹配">{{ kw_list|join('\n') }}</textarea>
+                <div class="muted" style="font-size:11px; margin-top:4px">
+                    每行一个（也支持逗号/顿号分隔），大小写不敏感，子串匹配。
+                    语音按转写文本匹配，链接/文件按内容里的 <code>title</code> 匹配。
+                    <b>配了关键词的群</b>即便不勾 ★，当天命中的发言也会进归档。
+                </div>
+            </div>
+        </details>
         {% endfor %}
     {% else %}
         <p class="empty">还没有标定</p>
@@ -100,7 +272,77 @@
     {% endif %}
 </div>
 
-<button type="submit">💾 保存</button>
+<button type="submit">💾 保存（含敏感关键词）</button>
 </form>
+
+<script>
+// —— 表单字段按群整理提交 ——
+// 每个群提交两个数组字段（顺序 = 群在上面的出现顺序）：
+//   group_focus[]     重点成员 wxid（换行分隔）
+//   group_keywords[]  敏感关键词
+// 勾选框与文本框是同一份数据的两个视图：提交前把勾中的 wxid 并入文本框、去重，
+// 这样后端只按数组下标对齐解析，不会有 focus[i] 那种"多勾几个就错位"的问题。
+(function () {
+    var form = document.querySelector('form[action$="/labels/save"]');
+    if (!form) return;
+    var KEY_RE = /^\s*(#(\s|$)|;|\/\/)/;   // 整行注释（# 后跟空白、; 或 //）
+
+    function parseKeywords(text) {
+        var out = [], seen = {};
+        text.split(/\r?\n/).forEach(function (line) {
+            line = line.trim();
+            if (!line || KEY_RE.test(line)) return;
+            line.split(/[,，、]/).forEach(function (part) {
+                var p = part.trim();
+                if (p && !Object.prototype.hasOwnProperty.call(seen, p)) { seen[p] = 1; out.push(p); }
+            });
+        });
+        return out;
+    }
+
+    form.addEventListener('submit', function () {
+        var byGi = {};
+        form.querySelectorAll('.focus-ck').forEach(function (cb) {
+            var gi = cb.getAttribute('data-gi');
+            (byGi[gi] = byGi[gi] || []).push(cb);
+        });
+
+        Object.keys(byGi).forEach(function (gi) {
+            var ta = form.querySelector('.focus-ta[data-gi="' + gi + '"]');
+            if (!ta) return;
+            var merged = [];
+            byGi[gi].forEach(function (cb) {
+                if (cb.checked) cb.value.split(/\r?\n/).forEach(function (p) {
+                    p = p.trim(); if (p) merged.push(p);
+                });
+            });
+            parseKeywords(ta.value).forEach(function (p) { merged.push(p); });
+            var seen = {}, uniq = [];
+            merged.forEach(function (p) { if (!seen[p]) { seen[p] = 1; uniq.push(p); } });
+            ta.value = uniq.join('\n');
+        });
+
+        // 初始化两个数组字段（顺序与 group_key 一致，空也要提交，保证下标对齐）
+        var keys = form.querySelectorAll('input[name="group_key"]');
+        form.querySelectorAll('input.js-group-focus, input.js-group-keywords').forEach(function (n) { n.remove(); });
+        keys.forEach(function (k) {
+            var gi = Array.prototype.indexOf.call(keys, k);
+            var ta = form.querySelector('.focus-ta[data-gi="' + gi + '"]');
+            var kw = form.querySelector('.kw-ta[data-gi="' + gi + '"]');
+            addHidden('group_focus', ta ? ta.value : '');
+            addHidden('group_keywords', kw ? kw.value : '');
+        });
+    });
+
+    function addHidden(name, value) {
+        var n = document.createElement('input');
+        n.type = 'hidden';
+        n.className = 'js-' + name.replace('_', '-');
+        n.name = name;
+        n.value = value;
+        form.appendChild(n);
+    }
+})();
+</script>
 
 {% endblock %}

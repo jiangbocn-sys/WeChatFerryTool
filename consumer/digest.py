@@ -16,7 +16,9 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+from paths import data_root
+
+PROJECT_DIR = data_root()
 
 log = logging.getLogger("consumer.digest")
 
@@ -64,18 +66,28 @@ def generate_digest(
 
     labels = _load_labels(labels_path)
 
+    exclude_types = _exclude_types()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
+    raw_rows = conn.execute(
         """
-        SELECT group_name, sender, content, msg_type, received_at, transcript, direction, score
+        SELECT group_name, sender, content, msg_type, received_at, transcript, direction, score, priority
         FROM messages
-        WHERE received_at >= ? AND received_at < ? AND priority >= 1
+        WHERE received_at >= ? AND received_at < ?
         ORDER BY received_at ASC
         """,
         (start_ts, end_ts),
     ).fetchall()
     conn.close()
+
+    # 选取规则见 _in_digest：监控名单里的群（未设重点人）= 整群归档；
+    # 设了重点关注人 = 只归档这些人。与"入库闸门"解耦，改完可直接重跑当天归档。
+    monitored = _monitored_groups()
+    try:
+        rows = [r for r in raw_rows if _in_digest(r, labels, exclude_types, monitored)]
+    except Exception:  # noqa: BLE001
+        log.exception("归档选取异常，退回 priority>=1 旧规则")
+        rows = [r for r in raw_rows if int(r["priority"] or 0) >= 1]
 
     # 按 群 → 发送人 分组
     grouped: dict[str, dict[str, list[sqlite3.Row]]] = {}
@@ -136,6 +148,101 @@ def _render_content(m: sqlite3.Row) -> str:
         if tm:
             return f"[{label}] {tm.group(1)}"
     return f"[{label}]"
+
+
+def _exclude_types() -> set[int]:
+    """归档排除的消息类型，默认表情(47)。可由 config.yaml 的 digest.exclude_types 覆盖。"""
+    try:
+        import yaml
+        import paths
+        cfg = yaml.safe_load(paths.config_path().read_text(encoding="utf-8")) or {}
+        v = (cfg.get("digest") or {}).get("exclude_types")
+        if v is not None:
+            return {int(x) for x in v}
+    except Exception:  # noqa: BLE001
+        pass
+    return {47, 51, 10000, 10002}   # 表情 / 系统 / 系统 / 撤回
+
+
+def _kw_haystack(row) -> str:
+    """关键词匹配用的文本。
+
+    **不能只搜 content**：语音正文只在 transcript 列；图片/视频的 content 是 XML，
+    有意义的文字在 title/des 属性里。
+    """
+    import re
+    xml = row["content"] or ""
+    parts = [xml, row["transcript"] or ""]
+    if "<" in xml:
+        for pat in (r"<title>(.*?)</title>", r'\btitle="([^"]{1,80})"',
+                    r'\bdes="([^"]{1,120})"'):
+            parts.extend(m.group(1) for m in re.finditer(pat, xml, re.S))
+    return "\n".join(parts).lower()
+
+
+def _monitored_groups() -> set[str] | None:
+    """config.yaml 的 `filter.groups`（= 总设置页里勾选的"监控的群"）。
+
+    返回 None 表示**没有配置监控名单**（= 不限制，按旧的 labels 规则走）。
+    这条很重要：设置了监控群以后，归档范围就与监控名单一致了 —— 否则会出现
+    "加进监控却在归档里看不到"的困惑。
+    """
+    try:
+        import paths
+        import yaml
+        cfg = yaml.safe_load(paths.config_path().read_text(encoding="utf-8")) or {}
+        v = (cfg.get("filter") or {}).get("groups")
+        if v:
+            return {str(x).strip() for x in v if str(x).strip()}
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _in_digest(row, labels: dict, exclude_types: set[int],
+               monitored: set[str] | None = None) -> bool:
+    """归档选取规则。
+
+    用户规则（2026-10-06 明确）：
+      * 群在**监控名单**（`filter.groups`）里、且**没设重点关注人** → 整群归档
+      * 群设了**重点关注人** → 只归档这些人的发言（其它人不进归档）
+      * 另外两种补充来源：群的**敏感关键词**命中、**全局重点联系人**的发言
+
+    `monitored=None`（没配监控名单）时退回旧规则：靠 labels 里的 important/focus/keywords 判定。
+    """
+    if int(row["msg_type"] or 0) in exclude_types:
+        return False
+
+    gname = row["group_name"] or ""
+    sender = row["sender"] or ""
+    g = (labels.get("groups") or {}).get(gname) or {}
+    s = (labels.get("senders") or {}).get(sender) or {}
+
+    focus = [m for m in (g.get("focus_members") or []) if m]
+    kws = [str(k).strip() for k in (g.get("keywords") or []) if str(k).strip()]
+    monitored_hit = (monitored is None) or (gname in monitored)
+
+    # 私聊：只有"全局重点联系人"才进归档
+    if not gname.endswith("@chatroom"):
+        return bool(s.get("important"))
+
+    # 重点群 = 在监控名单里 / 标记重点 / 配了重点成员 / 配了敏感关键词
+    if not (monitored_hit or g.get("important") or focus or kws):
+        return False
+
+    if focus:
+        # 设了重点关注人 → **只**归档这些人（这正是用户要的"只看重点人"）
+        return sender in focus
+    if monitored_hit and monitored is not None:
+        return True                      # 监控名单里的群、没设重点人 → 整群归档
+    if g.get("important"):
+        return True                      # 标记了"全群重点" → 整群归档
+    if kws:
+        return any(k.lower() in _kw_haystack(row) for k in kws)
+    if s.get("important"):
+        return True                      # 全局重点联系人（在群里发言也算）
+    return False
+
 
 
 def main() -> None:

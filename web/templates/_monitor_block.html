@@ -1,0 +1,133 @@
+{# 监控名单：必须放在“总设置”大表单**之外** —— HTML 不允许 form 嵌套，
+   否则内层 form 会被浏览器丢弃，点“添加”变成提交外层表单（踩过）。 #}
+<div class="card" style="background:#f4fbf7; border-left:4px solid #27ae60">
+    <h3 style="margin-top:0">📋 监控名单（勾选即可，不用手写 id）</h3>
+    <p class="hint" style="margin:0 0 10px">
+        这里选中的群 / 人会写进 <code>filter.groups</code> / <code>filter.senders</code>，
+        <b>同时决定 23:30 归档与总结的范围</b>：
+        <br>· 群在名单里、<b>没设重点关注人</b> → <b>整群归档 + 总结</b>
+        <br>· 群设了<b>重点关注人</b> → <b>只归档这些人的发言</b>（其他人不进归档）
+        <br>另：群的<b>敏感关键词</b>命中、<b>全局重点联系人</b>的发言，也会进归档（在标定页设置）。
+    </p>
+
+    <h4 style="margin:12px 0 6px">监控的群（{{ group_rows|length }} 个）</h4>
+    {% if group_rows %}
+    <table style="width:100%; font-size:13px; border-collapse:collapse">
+        <tr style="text-align:left; color:#7f8c8d">
+            <th style="padding:4px 6px">群</th>
+            <th style="padding:4px 6px">归档范围</th>
+            <th style="padding:4px 6px">重点关注的人</th>
+            <th style="padding:4px 6px">操作</th>
+        </tr>
+        {% for g in group_rows %}
+        <tr style="border-top:1px solid #e8f0eb">
+            <td style="padding:6px">
+                <b>{{ g.name }}</b>
+                {% if g.name != g.id %}<div class="hint" style="margin:0"><code style="font-size:11px">{{ g.id }}</code></div>{% endif %}
+            </td>
+            <td style="padding:6px">
+                {% if g.focus %}
+                    <span style="color:#e67e22">只归档 {{ g.focus|length }} 位重点关注人</span>
+                {% else %}
+                    <span style="color:#27ae60">整群归档</span>
+                    {% if g.keywords %}<span class="hint" style="display:block; margin:0">另有 {{ g.keywords }} 个敏感关键词会命中</span>{% endif %}
+                {% endif %}
+            </td>
+            <td style="padding:6px">
+                {% if g.focus %}
+                    {% for f in g.focus %}
+                    <span style="display:inline-block; background:#eaf4ff; border-radius:10px; padding:2px 8px; margin:2px 4px 2px 0">
+                        {{ f.name }}
+                        <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline"
+                              onsubmit="return confirm('把 {{ f.name }} 从重点关注人里移除？')">
+                            <input type="hidden" name="action" value="focus_remove">
+                            <input type="hidden" name="group" value="{{ g.id }}">
+                            <input type="hidden" name="sender" value="{{ f.id }}">
+                            <button type="submit" class="secondary" style="padding:0 5px; font-size:11px; border:none; background:none; color:#e74c3c; cursor:pointer">✕</button>
+                        </form>
+                    </span>
+                    {% endfor %}
+                {% else %}
+                    <span class="muted">未设置（整群归档）</span>
+                {% endif %}
+            </td>
+            <td style="padding:6px; white-space:nowrap">
+                <a class="button secondary" style="padding:3px 10px; font-size:12px"
+                   href="{{ url_for('config_focus_page', gid=g.id) }}">👥 选择重点人</a>
+                <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline"
+                      onsubmit="return confirm('把该群移出监控名单？（归档里将不再包含它）')">
+                    <input type="hidden" name="action" value="remove_group">
+                    <input type="hidden" name="group" value="{{ g.id }}">
+                    <button type="submit" class="secondary" style="padding:3px 10px; font-size:12px">移除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p class="empty" style="margin:0">还没监控任何群 —— 用下面的下拉框添加（留空 = 所有会话都抓）</p>
+    {% endif %}
+
+    <form method="POST" action="{{ url_for('config_filter_save') }}" class="monitor-add"
+          style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <input type="hidden" name="action" value="add_group">
+        <select name="group" class="monitor-select" style="min-width:320px">
+            <option value="">— 选择要监控的群（已标定的显示名字）—</option>
+            {% for g in all_groups %}
+                {% if g.id not in mon_groups %}<option value="{{ g.id }}">{{ g.name }}{% if g.name != g.id %}（{{ g.id }}）{% endif %}</option>{% endif %}
+            {% endfor %}
+        </select>
+        <button type="submit">➕ 添加</button>
+    </form>
+
+    <h4 style="margin:16px 0 6px">监控的人（{{ sender_rows|length }} 个）</h4>
+    {% if sender_rows %}
+    <div>
+        {% for s in sender_rows %}
+        <span style="display:inline-block; background:#eaf4ff; border-radius:10px; padding:3px 9px; margin:3px 5px 3px 0; font-size:13px">
+            {{ s.name }}
+            <form method="POST" action="{{ url_for('config_filter_save') }}" style="display:inline"
+                  onsubmit="return confirm('把 {{ s.name }} 移出监控名单？')">
+                <input type="hidden" name="action" value="remove_sender">
+                <input type="hidden" name="sender" value="{{ s.id }}">
+                <button type="submit" class="secondary" style="padding:0 5px; font-size:11px; border:none; background:none; color:#e74c3c; cursor:pointer">✕</button>
+            </form>
+        </span>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty" style="margin:0">还没监控任何人（私聊要进归档，就把对方加到这里，或在标定页勾 ★）</p>
+    {% endif %}
+
+    <form method="POST" action="{{ url_for('config_filter_save') }}" class="monitor-add"
+          style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <input type="hidden" name="action" value="add_sender">
+        <select name="sender" class="monitor-select" style="min-width:320px">
+            <option value="">— 选择要监控的人（已标定的显示名字）—</option>
+            {% for s in all_senders %}
+                {% if s.id not in mon_senders %}<option value="{{ s.id }}">{{ s.name }}{% if s.name != s.id %}（{{ s.id }}）{% endif %}</option>{% endif %}
+            {% endfor %}
+        </select>
+        <button type="submit">➕ 添加</button>
+    </form>
+    <p class="hint" style="margin-top:8px">
+        名单为空 = 不限制（所有会话都抓）。名单里的群/人在标定页会显示
+        <code>"monitored": true</code> 标记；标定页的<b>每群敏感关键词</b>仍然生效。
+    </p>
+</div>
+
+<script>
+// 没选任何一项就点“添加”时，给出明确提示（而不是静默什么都不发生）
+(function () {
+    document.querySelectorAll('form.monitor-add').forEach(function (f) {
+        f.addEventListener('submit', function (e) {
+            var sel = f.querySelector('select.monitor-select');
+            if (sel && !sel.value) {
+                e.preventDefault();
+                alert('请先在下拉框里选择一项，再点“添加”。');
+                sel.focus();
+            }
+        });
+    });
+})();
+</script>

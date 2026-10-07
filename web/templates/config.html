@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>总设置 · 高级（直接编辑 JSON）</h2>
+
+<div class="warn">
+    这里是<b>高级模式</b>：按段直接改 JSON，等同于手改 <code>config.yaml</code>。
+    日常调整请用 <a href="{{ url_for('config_page') }}" style="font-weight:600">⚙️ 总设置（表单）</a> —— 那边每项都有名称、影响说明和建议值。
+</div>
+
+{% if saved %}
+<div class="card" style="border-left:4px solid #27ae60; background:#eafaf1">
+    <b>已保存「{{ saved }}」段。</b>改动需要<b>重启 app</b> 才完全生效。
+</div>
+{% endif %}
+
+<div class="card" style="background:#eaf4ff">
+    <h3 style="margin-top:0">📌 有专门页面的设置（改这些更省事）</h3>
+    <div class="kv">
+        <div class="k">大模型</div>
+        <div class="v"><a href="{{ url_for('llm_page') }}">🧠 大模型设置</a> —— 表单填写 + <b>测试连接</b>，不用手写 JSON</div>
+        <div class="k">消息分类</div>
+        <div class="v"><a href="{{ url_for('settings_page') }}">🧩 消息分类</a> —— 勾选哪类消息不入库（写 storage.ingest_exclude_types）</div>
+        <div class="k">标定 / 关键词</div>
+        <div class="v"><a href="{{ url_for('labels_page') }}">🏷 标定</a> —— 显示名、★重点、重点成员、每群敏感关键词</div>
+        <div class="k">自动回复</div>
+        <div class="v"><a href="{{ url_for('replies_page') }}">🤖 自动回复</a> —— 模板/人设/限速（结构复杂，建议用这个页面）</div>
+        <div class="k">归档 / 总结</div>
+        <div class="v"><a href="{{ url_for('digest_page') }}">📝 归档/总结</a> —— 手动生成、预览 prompt、看文件</div>
+        <div class="k">监控规则</div>
+        <div class="v"><a href="{{ url_for('filter_page') }}">🎯 监控规则</a> —— 群/发送人/关键词白名单</div>
+    </div>
+</div>
+
+{% for r in rows %}
+<div class="card">
+    <h3 style="margin-top:0; display:flex; justify-content:space-between; align-items:center">
+        <span>
+            {{ r.title }} <code style="font-size:12px">{{ r.name }}</code>
+            {% if not r.exists %}<span class="tag">未配置</span>{% endif %}
+        </span>
+        <a class="button secondary" style="padding:4px 12px; font-size:13px"
+           href="{{ url_for('config_section_page', name=r.name) }}">✏️ 编辑</a>
+    </h3>
+    <p class="hint" style="margin:0 0 6px">{{ r.note }}</p>
+    {% if r.exists %}
+        <pre style="white-space:pre-wrap; word-break:break-word; background:#f8f9fa; padding:10px; border-radius:4px; font-size:12px; margin:0; max-height:220px; overflow:auto">{{ r.preview }}</pre>
+    {% else %}
+        <p class="empty" style="margin:0">该段还没有内容 —— 点「编辑」补上即可（例如填 API Key、开语音转写）。</p>
+    {% endif %}
+</div>
+{% endfor %}
+
+{% if unknown %}
+<div class="card">
+    <h3 style="margin-top:0">其它段（本页没有专门编辑器）</h3>
+    <p class="hint" style="margin:0">
+        配置文件里还有这些段，本页暂不提供编辑器：<code>{{ unknown|join('</code> <code>') }}</code>
+    </p>
+</div>
+{% endif %}
+
+<div class="card">
+    <h3 style="margin-top:0">配置文件</h3>
+    <div class="kv">
+        <div class="k">路径</div><div class="v"><code>{{ config_path }}</code></div>
+        <div class="k">备份</div><div class="v">每次保存前自动写 <code>config.yaml.bak-&lt;时间戳&gt;</code></div>
+    </div>
+    <p class="hint" style="margin:10px 0 0">
+        改完某项后建议：先看一眼 <a href="{{ url_for('digest_page') }}">/digest</a> 的「预览将发送的 prompt」，
+        或 <a href="{{ url_for('llm_page') }}">/llm</a> 的「测试连接」，确认配置真的对。
+    </p>
+</div>
+{% endblock %}

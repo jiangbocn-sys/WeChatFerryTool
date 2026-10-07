@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>当日归档 / 总结</h2>
+
+<p class="hint">
+    每天 <code>{{ cfg.time or '23:30' }}</code> 自动把「重点群 ∩ 重点成员 / 敏感关键词」的发言归档到 Markdown
+    （目录 <code>{{ reports_dir }}</code>）。这里可以<b>手动生成</b>某一天的归档，或把当天归档交给 LLM 总结成要点。
+</p>
+
+<div class="warn">
+    <strong>先预览，再生成</strong>：真实生成会调用
+    <code>{{ llm.model or '(未配置模型)' }}</code> @ <code>{{ llm.base_url or '(未配置 base_url)' }}</code>，
+    <b>会消耗 token/额度</b>。先点「预览将发送的 prompt」确认选中的内容对不对，再点生成。
+</div>
+
+<div class="card">
+    <h3 style="margin-top:0">生成</h3>
+    <div class="filters" style="margin-bottom:0">
+        <label style="font-weight:600">日期</label>
+        <input type="date" id="date" value="{{ date_str }}">
+        <button type="button" id="btn-preview" class="secondary">🔍 预览将发送的 prompt</button>
+        <button type="button" id="btn-generate">🧠 生成当日总结（调用 LLM）</button>
+        <button type="button" id="btn-digest" class="secondary">📄 只生成归档 Markdown（不调用 LLM）</button>
+        <span class="muted" id="status" style="font-size:12px"></span>
+    </div>
+    <p class="hint" style="margin-top:8px">
+        归档 Markdown 与 LLM 总结是两步：归档是纯本地筛选（<code>digest.py</code>），总结是
+        <code>summarize.py</code> 把归档内容交给大模型。两者用的是<b>同一套选中规则</b>。
+    </p>
+</div>
+
+<div class="card" id="preview-card" style="display:none">
+    <h3 style="margin-top:0">
+        预览结果
+        <span class="muted" id="preview-meta" style="font-size:12px"></span>
+    </h3>
+    <div id="preview-groups"></div>
+    <details style="margin-top:8px">
+        <summary style="cursor:pointer">完整 prompt（原样发给模型）</summary>
+        <pre id="preview-prompt" style="white-space:pre-wrap; word-break:break-word; background:#f8f9fa; padding:10px; border-radius:4px; font-size:12px; margin-top:8px"></pre>
+    </details>
+</div>
+
+<div class="card" id="result-card" style="display:none">
+    <h3 style="margin-top:0">总结结果 <span class="muted" id="result-meta" style="font-size:12px"></span></h3>
+    <div id="result-body" style="white-space:pre-wrap; line-height:1.7"></div>
+</div>
+
+<div class="card">
+    <h3 style="margin-top:0">归档与总结文件</h3>
+    {% if reports %}
+    <table>
+        <thead><tr><th>文件</th><th>类型</th><th>时间</th><th>大小</th><th></th></tr></thead>
+        <tbody>
+        {% for r in reports %}
+            <tr {% if r.is_date %}style="background:#fff8e1"{% endif %}>
+                <td><code>{{ r.name }}</code></td>
+                <td>{% if r.summary %}<span class="tag important">LLM 总结</span>{% else %}<span class="tag">归档</span>{% endif %}</td>
+                <td class="muted">{{ r.mtime }}</td>
+                <td class="muted">{{ (r.size / 1024) | round(1) }} KB</td>
+                <td>
+                    <a class="button secondary" style="padding:2px 10px; font-size:12px"
+                       href="{{ url_for('report_view', name=r.name) }}">查看</a>
+                    <a class="button secondary" style="padding:2px 10px; font-size:12px"
+                       href="{{ url_for('report_download', name=r.name) }}">下载</a>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty">该目录下还没有归档文件。</p>
+    {% endif %}
+</div>
+
+<script>
+(function () {
+    var $ = function (id) { return document.getElementById(id); };
+    var poll = null;
+
+    function setStatus(txt, color) {
+        $('status').textContent = txt || '';
+        $('status').style.color = color || '#7f8c8d';
+    }
+
+    function renderPreview(j) {
+        $('preview-card').style.display = '';
+        $('preview-meta').textContent =
+            j.date + ' · ' + j.total + ' 条归档消息 · ' + j.conversations + ' 个会话 · prompt ' + j.chars + ' 字';
+        var html = '';
+        j.groups.forEach(function (g) {
+            html += '<div style="margin-bottom:6px"><strong>' + esc(g.name) + '</strong> ' +
+                    '<span class="muted">(' + g.n + ' 条)</span><div class="muted" style="font-size:12px; margin-left:12px">';
+            g.sample.forEach(function (line) { html += esc(line) + '<br>'; });
+            if (g.n > g.sample.length) html += '…';
+            html += '</div></div>';
+        });
+        $('preview-groups').innerHTML = html;
+        $('preview-prompt').textContent = j.prompt;
+    }
+
+    function esc(s) {
+        return String(s).replace(/[&<>"]/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+        });
+    }
+
+    $('btn-preview').addEventListener('click', function () {
+        setStatus('正在本地拼装 prompt…');
+        fetch('/api/digest/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ date: $('date').value })
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+          .then(function (res) {
+              if (!res.ok || !res.j.ok) { setStatus(res.j.error || '预览失败', '#e74c3c'); return; }
+              renderPreview(res.j);
+              setStatus('预览完成（未联网、未消耗额度）', '#27ae60');
+          })
+          .catch(function (e) { setStatus('请求失败: ' + e, '#e74c3c'); });
+    });
+
+    $('btn-digest').addEventListener('click', function () {
+        setStatus('正在生成归档 Markdown…');
+        fetch('/api/digest/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ date: $('date').value })
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+          .then(function (res) {
+              if (!res.ok || !res.j.ok) { setStatus(res.j.error || '生成失败', '#e74c3c'); return; }
+              setStatus('归档已生成：' + res.j.name + '（' + res.j.total + ' 条）——刷新页面可在下方列表查看', '#27ae60');
+          })
+          .catch(function (e) { setStatus('请求失败: ' + e, '#e74c3c'); });
+    });
+
+    function tick() {
+        fetch('/api/digest/summarize/status', { cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (st) {
+                if (st.running) {
+                    setStatus('LLM 正在总结 ' + st.date + '… 已 ' + st.seconds + ' 秒（别关这个页面）', '#f39c12');
+                    return;
+                }
+                clearInterval(poll); poll = null;
+                $('btn-generate').disabled = false;
+                if (st.error) { setStatus('生成失败：' + st.error, '#e74c3c'); return; }
+                if (st.result) {
+                    setStatus('生成完成，共 ' + st.result.total + ' 条归档消息', '#27ae60');
+                    $('result-card').style.display = '';
+                    $('result-meta').textContent = st.result.name + ' · ' +
+                        st.result.conversations + ' 个会话 · ' + st.result.chars + ' 字 prompt';
+                    $('result-body').textContent = st.result.content;
+                }
+            })
+            .catch(function () {});
+    }
+
+    $('btn-generate').addEventListener('click', function () {
+        var d = $('date').value;
+        if (!confirm('真实调用 LLM 总结 ' + d + ' 的归档（会消耗额度）。确定继续？')) return;
+        $('result-card').style.display = 'none';
+        setStatus('已提交…');
+        fetch('/api/digest/summarize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ date: d })
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+          .then(function (res) {
+              if (!res.j.ok) { setStatus(res.j.error || '提交失败', '#e74c3c'); return; }
+              $('btn-generate').disabled = true;
+              if (!poll) poll = setInterval(tick, 2000);
+              tick();
+          })
+          .catch(function (e) { setStatus('请求失败: ' + e, '#e74c3c'); });
+    });
+
+    // 上次生成还在跑（例如刷新了页面）→ 自动接上进度
+    if ({{ (job.running | tojson) }}) {
+        $('btn-generate').disabled = true;
+        poll = setInterval(tick, 2000);
+        tick();
+    }
+})();
+</script>
+{% endblock %}

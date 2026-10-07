@@ -27,21 +27,51 @@
         <option value="10000" {% if msg_type == '10000' %}selected{% endif %}>10000 系统</option>
         <option value="other" {% if msg_type == 'other' %}selected{% endif %}>其他</option>
     </select>
-    <select name="group" style="max-width:220px" title="群/会话（按最近活跃倒序，前 20）">
+    <select name="group" style="max-width:260px" title="群/会话：已标定的全部列出；未标定的只列最近活跃的">
         <option value="">全部群/会话</option>
-        {% for g in group_opts %}
-        <option value="{{ g.k }}" {% if group == g.k %}selected{% endif %} title="{{ g.k }}">
-            {{ g.label }}{% if g.n is not none %} · {{ g.n }}条{% endif %}{% if g.extra %} · 当前{% endif %}
-        </option>
-        {% endfor %}
+        {% set gl = group_opts | selectattr('lab') | list %}
+        {% set gu = group_opts | rejectattr('lab') | list %}
+        {% if gl %}
+        <optgroup label="已标定（全部）">
+            {% for g in gl %}
+            <option value="{{ g.k }}" {% if group == g.k %}selected{% endif %} title="{{ g.k }}">
+                {{ g.label }}{% if g.n is not none %} · {{ g.n }}条{% endif %}
+            </option>
+            {% endfor %}
+        </optgroup>
+        {% endif %}
+        {% if gu %}
+        <optgroup label="最近活跃（未标定）">
+            {% for g in gu %}
+            <option value="{{ g.k }}" {% if group == g.k %}selected{% endif %} title="{{ g.k }}">
+                {{ g.k }}{% if g.n is not none %} · {{ g.n }}条{% endif %} · 未标定
+            </option>
+            {% endfor %}
+        </optgroup>
+        {% endif %}
     </select>
-    <select name="sender" style="max-width:200px" title="发送人（按最近活跃倒序，前 20）">
+    <select name="sender" style="max-width:240px" title="发送人：已标定的全部列出；未标定的只列最近活跃的（公众号已排除）">
         <option value="">全部发送人</option>
-        {% for s in sender_opts %}
-        <option value="{{ s.k }}" {% if sender == s.k %}selected{% endif %} title="{{ s.k }}">
-            {{ s.label }}{% if s.n is not none %} · {{ s.n }}条{% endif %}{% if s.extra %} · 当前{% endif %}
-        </option>
-        {% endfor %}
+        {% set sl = sender_opts | selectattr('lab') | list %}
+        {% set su = sender_opts | rejectattr('lab') | list %}
+        {% if sl %}
+        <optgroup label="已标定（全部）">
+            {% for s in sl %}
+            <option value="{{ s.k }}" {% if sender == s.k %}selected{% endif %} title="{{ s.k }}">
+                {{ s.label }}{% if s.n is not none %} · {{ s.n }}条{% endif %}
+            </option>
+            {% endfor %}
+        </optgroup>
+        {% endif %}
+        {% if su %}
+        <optgroup label="最近活跃（未标定）">
+            {% for s in su %}
+            <option value="{{ s.k }}" {% if sender == s.k %}selected{% endif %} title="{{ s.k }}">
+                {{ s.k }}{% if s.n is not none %} · {{ s.n }}条{% endif %} · 未标定
+            </option>
+            {% endfor %}
+        </optgroup>
+        {% endif %}
     </select>
     <input type="text" name="keyword" value="{{ keyword }}" placeholder="关键词" style="width:100px">
     <label><input type="checkbox" name="important" value="1" {% if only_important %}checked{% endif %}> 只看重点</label>
@@ -55,7 +85,7 @@
 {% if rows %}
 <div class="card">
 {% for r in rows %}
-    <div class="message {% if r.priority >= 1 or r.important_match %}imp{% endif %}">
+    <div class="message {% if (r.priority or 0) >= 1 or r.important_match %}imp{% endif %}">
         <div class="meta">
             <span class="ts">{{ r.ts }}</span>
             {% if '@chatroom' in r.group_name %}<span class="tag">👥 群</span>
@@ -69,7 +99,7 @@
             {% elif r.msg_type == 51 %}<span class="tag">⚙️系统</span>
             {% elif r.msg_type != 1 %}<span class="tag">type={{ r.msg_type }}</span>
             {% endif %}
-            {% if r.priority >= 1 %}<span class="tag important">★重要</span>{% endif %}
+            {% if (r.priority or 0) >= 1 %}<span class="tag important">★重要</span>{% endif %}
             {% if r.pushed %}<span class="tag">📤已推送</span>{% endif %}
             {% if r.group_important %}<span class="tag important">★群</span>{% endif %}
             {% if r.sender_important %}<span class="tag important">★人</span>{% endif %}
