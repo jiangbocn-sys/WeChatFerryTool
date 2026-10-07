@@ -40,21 +40,37 @@ $outDir = Join-Path $env:TEMP 'wft-regression-logs'
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
 $failed = @()
-foreach ($s in $suites) {
-    $log = Join-Path $outDir ($s.BaseName + '.log')
-    & $py -B $s.FullName *> $log
-    $code = $LASTEXITCODE
-    $tail = (Get-Content $log -Encoding UTF8 -ErrorAction SilentlyContinue |
-             Select-String -Pattern 'FAILED|ALL PASSED|REG RESSION|PASSED' |
-             Select-Object -Last 1)
-    $status = if ($code -eq 0) { 'OK  ' } else { 'FAIL' }
-    Write-Output ("[{0}] {1}  {2}" -f $s.BaseName, $status, $tail)
-    if ($code -ne 0) {
-        $failed += $s.BaseName
-        Get-Content $log -Encoding UTF8 -ErrorAction SilentlyContinue |
-            Select-String -Pattern '  FAIL' | Select-Object -First 3 |
-            ForEach-Object { Write-Output ("        " + $_.Line.Trim()) }
+try {
+    foreach ($s in $suites) {
+        $log = Join-Path $outDir ($s.BaseName + '.log')
+        & $py -B $s.FullName *> $log
+        $code = $LASTEXITCODE
+        $tail = (Get-Content $log -Encoding UTF8 -ErrorAction SilentlyContinue |
+                 Select-String -Pattern 'FAILED|ALL PASSED|REG RESSION|PASSED' |
+                 Select-Object -Last 1)
+        $status = if ($code -eq 0) { 'OK  ' } else { 'FAIL' }
+        Write-Output ("[{0}] {1}  {2}" -f $s.BaseName, $status, $tail)
+        if ($code -ne 0) {
+            $failed += $s.BaseName
+            Get-Content $log -Encoding UTF8 -ErrorAction SilentlyContinue |
+                Select-String -Pattern '  FAIL' | Select-Object -First 3 |
+                ForEach-Object { Write-Output ("        " + $_.Line.Trim()) }
+        }
     }
+}
+finally {
+    # Sweep the scratch dirs every suite creates ('.wft-*' next to the repo).
+    # Suites clean up after themselves, but a FAILING suite never reaches its
+    # rmtree, and a few suites (_quit/_reload/_discover/_e6/_frozen_root) have no
+    # cleanup at all -- they used to pile up (~34 MB) in D:\projects.
+    # Runs after the last suite, so nothing is still using these dirs.
+    $scratchRoot = Split-Path $root -Parent
+    $swept = 0
+    Get-ChildItem $scratchRoot -Filter '.wft-*' -Directory -Force -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop; $swept++ } catch { }
+        }
+    if ($swept) { Write-Output ("swept {0} scratch dir(s) under {1}" -f $swept, $scratchRoot) }
 }
 
 Write-Output ""
