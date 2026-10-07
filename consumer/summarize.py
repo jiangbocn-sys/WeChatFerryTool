@@ -35,6 +35,7 @@ from consumer.digest import (  # noqa: E402
     _TYPE_LABEL,
     _exclude_types,
     _in_digest,
+    _is_star,
     _load_labels,
     _monitored_groups,
     _render_content,
@@ -52,6 +53,8 @@ PROMPT_TEMPLATE = """你是一个群聊内容整理助手。
 下面是「{date}」的群聊发言记录（已按时间排序，格式为 `[时间] 发送人（类型）：内容`）。
 说明：「图片」「视频」是占位符——说明该时刻有人发了图片/视频，但没有可提取的文字描述；
 「语音转文本」是语音消息的自动转写结果，可能存在识别误差。
+**发送人前面带 `★` 的是群主重点关注的人**（他们的话往往更关键，但不代表其它人的发言可以忽略——
+恰恰相反，别人的提问与回应是理解上下文的关键）。
 
 请根据讨论的内容，总结核心要点，按顺序逐条输出总结内容。
 
@@ -59,7 +62,8 @@ PROMPT_TEMPLATE = """你是一个群聊内容整理助手。
 1. 按时间顺序逐条输出总结要点，每条一行，以「- 」开头
 2. 输入记录已按时间排序、且每条都标注了时刻，请据此梳理讨论的先后与进展；
    输出**不需要**逐条标注时间
-3. 保留对话中出现的关键信息：人名、时间、数字、金额、结论、待办事项
+3. 保留对话中出现的关键信息：人名、时间、数字、金额、结论、待办事项；
+   **带 ★ 的人是重点关注对象**，其发言要优先覆盖，但梳理因果时必须结合其它人的提问与回应
 4. 同一话题的连续发言合并为一条要点，不要逐句复述原文
 5. 不要编造记录中没有的信息；转写明显有误时标注「（转写存疑）」
 6. 忽略寒暄、表情与无实质内容的发言
@@ -147,8 +151,10 @@ def build_lines(rows: list[sqlite3.Row], labels: dict) -> dict[str, list[str]]:
         sname = ((labels.get("senders") or {}).get(skey) or {}).get("name") or skey
 
         body = _render_content(r).replace("\n", " ").strip()
+        # 重点人/重点群**不再被过滤**，而是打 ★ 标记交给模型加权（10-07 用户确认）
+        star = "★" if _is_star(r, labels) else ""
         out.setdefault(gkey, []).append(
-            f"[{hhmm}] {sname}（{_type_label(int(r['msg_type'] or 0))}）：{body}"
+            f"[{hhmm}]{star}{sname}（{_type_label(int(r['msg_type'] or 0))}）：{body}"
         )
     return out
 

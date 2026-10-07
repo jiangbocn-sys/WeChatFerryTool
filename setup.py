@@ -117,9 +117,9 @@ def default_config(ans: dict) -> dict:
             #           combined  = 所有群合并成一份 summary-<日期>.md（只调一次）
             "summarize_mode": "per_group",
             # 归档排除的消息类型：表情(47)/系统(51、10000)/撤回(10002)。
-            # 与「入库闸门」storage.ingest_exclude_types 是两件事：这里决定"进不进归档"，
-            # 改完可以直接重跑当天归档，不需要重新入库。
-            "exclude_types": [47, 51, 10000, 10002],
+            # ⚠️ 10-07 起归档范围 = **监控名单里的群的全部对话**（重点人只用 ★ 标记、
+            # 不再过滤），所以这里的排除项要尽量只留真噪音，否则总结会缺上下文。
+            "exclude_types": [47, 51, 10000],
         },
         "replies": {
             "enabled": replies_on,

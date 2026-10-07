@@ -138,6 +138,23 @@ check("**名单外的群 → 不入归档**（但已入库）",
 check("名单外的私聊 → 不入归档（只有★重点联系人才进）",
       digest_mod._in_digest(row_pv, labels, excl, mon) is False)
 
+print("\n[2b] 归档范围（10-07 第二版）：监控群整群对话 + 重点人只打 ★ 不过滤")
+row_mon = {"group_name": MON_GROUP, "sender": "wxid_anyone", "msg_type": 1,
+           "content": "普通路人说话", "transcript": None, "priority": 0}
+row_focus = {"group_name": MON_GROUP, "sender": "wxid_focus", "msg_type": 1,
+             "content": "重点人说话", "transcript": None, "priority": 1}
+labels_focus = {"groups": {MON_GROUP: {"name": "甲群", "focus_members": ["wxid_focus"]}},
+                "senders": {"wxid_focus": {"name": "重点人", "important": True}}}
+check("**监控群 + 设了重点人 → 路人照样进归档**（上下文优先）",
+      digest_mod._in_digest(row_mon, labels_focus, excl, mon) is True)
+check("重点人也进归档", digest_mod._in_digest(row_focus, labels_focus, excl, mon) is True)
+check("重点人会被标记 ★", digest_mod._is_star(row_focus, labels_focus) is True)
+check("路人不会被标记 ★", digest_mod._is_star(row_mon, labels_focus) is False)
+check("不在监控名单的群仍不进归档",
+      digest_mod._in_digest({"group_name": "zz@chatroom", "sender": "wxid_x", "msg_type": 1,
+                             "content": "x", "transcript": None},
+                            labels_focus, excl, mon) is False)
+
 print("\n[3] 全抓之后数据量确实变大（这就是这个需求的代价，写下来备查）")
 cons.handle_message({"event_type": 1001, "type": 1, "msgid": "bulk", "wxid": OTHER_GROUP,
                      "roomid": OTHER_GROUP, "sender": "wxid_bulk",

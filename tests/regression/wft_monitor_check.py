@@ -1,4 +1,4 @@
-﻿"""验证监控名单下拉勾选 + 每群重点关注人 + 归档范围规则。
+"""验证监控名单下拉勾选 + 每群重点关注人 + 归档范围规则。
 
 覆盖：
 * 监控名单增删（群/人）写入 filter.*，并在 labels 里打 monitored 标记
@@ -155,10 +155,14 @@ L = labels()
 EX = {47, 51, 10000, 10002}
 MON = {"958062774@chatroom"}          # 只监控这一个群
 
-check("监控群 + 设了重点人 → 重点人归档",
+check("监控群 + 设了重点人 → **重点人照样归档**",
       dg._in_digest(row("958062774@chatroom", "wxid_aaa111"), L, EX, MON) is True)
-check("监控群 + 设了重点人 → 非重点人不归档",
-      dg._in_digest(row("958062774@chatroom", "wxid_ddd444"), L, EX, MON) is False)
+# 2026-10-07 用户确认：归档要的是**上下文**，重点人只用 ★ 标记、不再把别人过滤掉
+check("监控群 + 设了重点人 → **非重点人也归档**（整群对话，上下文优先）",
+      dg._in_digest(row("958062774@chatroom", "wxid_ddd444"), L, EX, MON) is True)
+check("非重点人的行会被打 ★ 吗 → 不会（只有重点人打 ★）",
+      dg._is_star(row("958062774@chatroom", "wxid_ddd444"), L) is False)
+check("重点人的行会打 ★", dg._is_star(row("958062774@chatroom", "wxid_aaa111"), L) is True)
 check("没监控的群 → 不归档", dg._in_digest(row("195940014@chatroom", "wxid_aaa111"), L, EX, MON) is False)
 check("排除类型（表情）永不归档",
       dg._in_digest(row("958062774@chatroom", "wxid_aaa111", mtype=47), L, EX, MON) is False)

@@ -125,6 +125,23 @@ def generate_digest(
     return path
 
 
+def _is_star(row, labels: dict) -> bool:
+    """这条发言是不是"重点关注"（重点群的成员 / ★重点群 / 全局重点联系人）。
+
+    10-07 起重点人**不再被过滤**，而是渲染时行首加 `★`，让 LLM 自己加权。
+    """
+    gname = row["group_name"] or ""
+    sender = row["sender"] or ""
+    g = (labels.get("groups") or {}).get(gname) or {}
+    s = (labels.get("senders") or {}).get(sender) or {}
+    if s.get("important"):
+        return True
+    if g.get("important"):
+        return True
+    focus = [m for m in (g.get("focus_members") or []) if m]
+    return bool(focus) and sender in focus
+
+
 def _render_content(m: sqlite3.Row) -> str:
     """归档里每条消息的单行摘要。
 
@@ -146,7 +163,12 @@ def _render_content(m: sqlite3.Row) -> str:
 
 
 def _exclude_types() -> set[int]:
-    """归档排除的消息类型，默认表情(47)。可由 config.yaml 的 digest.exclude_types 覆盖。"""
+    """归档排除的消息类型（噪音闸门）。
+
+    默认 = **表情(47) + 系统(51, 10000) + 撤回(10002)** —— 见 `config.yaml` 的
+    `digest.exclude_types`。注意 10-07 起**入库闸门是入库闸门、这里是归档闸门**：
+    入库侧可能挡掉更多类型（视频/图片/名片…），若某个类型没入库，这里也自然没有它。
+    """
     try:
         import yaml
         import paths
@@ -156,7 +178,7 @@ def _exclude_types() -> set[int]:
             return {int(x) for x in v}
     except Exception:  # noqa: BLE001
         pass
-    return {47, 51, 10000, 10002}   # 表情 / 系统 / 系统 / 撤回
+    return {47, 51, 10000}   # 表情 / 系统 / 系统（撤回 10002 归入正文，保住上下文）
 
 
 def _kw_haystack(row) -> str:
@@ -220,10 +242,16 @@ def _in_digest(row, labels: dict, exclude_types: set[int],
                monitored: set[str] | None = None) -> bool:
     """归档选取规则。
 
-    用户规则（2026-10-06 明确）：
-      * 群在**监控名单**（`filter.groups`）里、且**没设重点关注人** → 整群归档
-      * 群设了**重点关注人** → 只归档这些人的发言（其它人不进归档）
-      * 另外两种补充来源：群的**敏感关键词**命中、**全局重点联系人**的发言
+    **用户决定（2026-10-07，第二版）**：归档/总结要的是**上下文**，不是"只有重点人说的话"。
+    只给重点人的发言会让 LLM 看不到"谁在问、别人怎么接"，因果链和代词全丢。
+    所以现在：
+
+      * 群在**监控名单**（`filter.groups`）里 → **整群对话都进归档**（不再按重点人过滤）；
+      * **重点人/★重点群不再过滤，而是"标记"** —— 渲染时行首加 `★`（见 `_render_content`），
+        并在 prompt 里告诉模型"★ 是重点关注的人"，由它自己在总结时加权；
+      * 群**不在**监控名单，但设了敏感关键词 → 只有命中关键词的行进归档（保留这条补充来源）；
+      * 私聊 → 只有"全局重点联系人"才进（私聊没有群上下文可言，维持原样）；
+      * 类型闸门（`exclude_types`）依旧先生效（表情/系统等噪音先挡掉）。
 
     `monitored=None`（没配监控名单）时退回旧规则：靠 labels 里的 important/focus/keywords 判定。
     """
@@ -238,27 +266,27 @@ def _in_digest(row, labels: dict, exclude_types: set[int],
     focus = [m for m in (g.get("focus_members") or []) if m]
     kws = [str(k).strip() for k in (g.get("keywords") or []) if str(k).strip()]
     monitored_hit = (monitored is None) or (gname in monitored)
+    is_group = gname.endswith("@chatroom")
 
     # 私聊：只有"全局重点联系人"才进归档
-    if not gname.endswith("@chatroom"):
+    if not is_group:
         return bool(s.get("important"))
 
-    # 重点群 = 在监控名单里 / 标记重点 / 配了重点成员 / 配了敏感关键词
-    if not (monitored_hit or g.get("important") or focus or kws):
-        return False
-
-    if focus:
-        # 设了重点关注人 → **只**归档这些人（这正是用户要的"只看重点人"）
-        return sender in focus
+    # ① 监控名单里的群 → 整群对话（上下文优先，重点人靠 ★ 标记而不是过滤）
     if monitored_hit and monitored is not None:
-        return True                      # 监控名单里的群、没设重点人 → 整群归档
+        return True
+
+    # ② 没配监控名单时的旧规则：标记重点 / 配了重点成员 / 配了敏感关键词
+    if not (g.get("important") or focus or kws):
+        return False
+    if focus:
+        # 没有监控名单时的兜底：只归档重点成员 + 全局重点联系人（原行为）
+        return sender in focus or bool(s.get("important"))
     if g.get("important"):
-        return True                      # 标记了"全群重点" → 整群归档
-    if kws:
-        return any(k.lower() in _kw_haystack(row) for k in kws)
-    if s.get("important"):
-        return True                      # 全局重点联系人（在群里发言也算）
-    return False
+        return True
+    if kws and any(k.lower() in _kw_haystack(row) for k in kws):
+        return True
+    return bool(s.get("important"))
 
 
 

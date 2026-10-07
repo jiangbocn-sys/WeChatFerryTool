@@ -60,21 +60,22 @@ from consumer import digest as digest_mod  # noqa: E402
 
 print("\n[2] E3：digest.exclude_types 默认值")
 cfg = setup_mod.default_config({"run_mode": setup_mod.RUN_MODE_CAPTURE})
-check("default_config 写出 digest.exclude_types", cfg["digest"].get("exclude_types") == [47, 51, 10000, 10002],
+# 10-07 起默认只留真噪音（表情/系统），撤回(10002) 归入正文以保住上下文
+check("default_config 写出 digest.exclude_types", cfg["digest"].get("exclude_types") == [47, 51, 10000],
       str(cfg["digest"].get("exclude_types")))
 check("storage 默认仍只有 47", cfg["storage"].get("ingest_exclude_types") == [47],
       str(cfg["storage"].get("ingest_exclude_types")))
 
 # 配置里没有该键 → 代码兜底；配置里有 → 以配置为准
 (SCRATCH / "config.yaml").write_text("digest:\n  enabled: true\n", encoding="utf-8")
-check("配置缺该键时用代码兜底", digest_mod._exclude_types() == {47, 51, 10000, 10002},
+check("配置缺该键时用代码兜底", digest_mod._exclude_types() == {47, 51, 10000},
       str(sorted(digest_mod._exclude_types())))
 (SCRATCH / "config.yaml").write_text("digest:\n  exclude_types: [47, 51]\n", encoding="utf-8")
 check("配置有该键时以配置为准", digest_mod._exclude_types() == {47, 51},
       str(sorted(digest_mod._exclude_types())))
-# 真实 config.yaml（已补上默认值）读出来必须仍是那四个
+# 真实 config.yaml 读出来必须与默认一致
 (SCRATCH / "config.yaml").unlink()
-check("真实 config.yaml 的 exclude_types 生效", digest_mod._exclude_types() == {47, 51, 10000, 10002},
+check("真实 config.yaml 的 exclude_types 生效", digest_mod._exclude_types() == {47, 51, 10000},
       str(sorted(digest_mod._exclude_types())))
 
 print("\n[3] E4：LLM model 非空校验（全部 dry_run=True）")
@@ -108,7 +109,7 @@ check("真实 config.yaml 仍可解析且 llm 段完好",
       real_cfg["llm"]["base_url"].startswith("https://") and real_cfg["llm"]["model"],
       f'{real_cfg["llm"]["base_url"]} / {real_cfg["llm"]["model"]}')
 check("真实 config.yaml 已含 digest.exclude_types",
-      real_cfg["digest"].get("exclude_types") == [47, 51, 10000, 10002],
+      real_cfg["digest"].get("exclude_types") == [47, 51, 10000],
       str(real_cfg["digest"].get("exclude_types")))
 
 print("\n[5] summarize.strip_think：真实 MiniMax 返回格式")

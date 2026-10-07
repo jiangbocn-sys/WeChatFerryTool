@@ -89,8 +89,11 @@ print("\n[2] /digest 预览（不联网）")
 r = c.post("/api/digest/preview", json={"date": "2026-10-05"})
 j = r.get_json()
 check("预览 200 且返回 prompt", r.status_code == 200 and j.get("ok") and j.get("chars", 0) > 0,
-      f"chars={j.get('chars')} total={j.get('total')}")
+      f"chars={j.get('chars')} total={j.get('total')} conv={j.get('conversations')}")
 check("预览没有调用 LLM", calls["n"] == 0)
+# 10-07 起归档范围 = 监控名单里各群的**全部对话**，符合条件的群变多了 →
+# per_group 模式下"每个群一次调用"，所以这里用预览给出的会话数来断言，别写死 1。
+_conv = int(j.get("conversations") or 1)
 
 print("\n[3] /digest 真实生成（假 LLM）→ 验证 <think> 已被剥掉")
 r = c.post("/api/digest/summarize", json={"date": "2026-10-05"})
@@ -103,7 +106,8 @@ for _ in range(200):
     time.sleep(0.2)
 res = st.get("result") or {}
 check("生成完成无错误", not st.get("error"), str(st.get("error"))[:80])
-check("LLM 被调用一次", calls["n"] == 1, str(calls["n"]))
+check("LLM 调用次数 = 会话数（per_group 每群一次）", calls["n"] == _conv,
+      f"调用 {calls['n']} 次，预览会话数 {_conv}")
 check("返回内容里没有 <think>", "<think>" not in (res.get("content") or ""),
       repr((res.get("content") or "")[:60]))
 check("返回内容含要点正文", "- 学员确认今晚无课" in (res.get("content") or ""),
