@@ -71,7 +71,8 @@ def generate_digest(
     conn.row_factory = sqlite3.Row
     raw_rows = conn.execute(
         """
-        SELECT group_name, sender, content, msg_type, received_at, transcript, direction, score, priority
+        SELECT msg_id, group_name, sender, content, msg_type, received_at, transcript,
+               direction, score, priority
         FROM messages
         WHERE received_at >= ? AND received_at < ?
         ORDER BY received_at ASC
@@ -104,6 +105,10 @@ def generate_digest(
 
     if not rows:
         lines.append("_（当天没有重点消息）_")
+    # 图片理解：一次性取本日所有图片消息的描述（带缓存；仅在设置页开启时才会调模型）
+    img_ids = [str(r["msg_id"]) for r in rows
+               if int(r["msg_type"] or 0) == 3 and r["msg_id"]]
+    descs = image_descriptions(img_ids) if img_ids else {}
     for gkey, senders in grouped.items():
         gname = _display(labels, "groups", gkey)
         lines.append(f"## {gname}")
@@ -115,7 +120,7 @@ def generate_digest(
             lines.append("")
             for m in msgs:
                 t = datetime.fromtimestamp(m["received_at"]).strftime("%H:%M")
-                content = _render_content(m)
+                content = _render_content(m, descs.get(str(m["msg_id"]), ""))
                 lines.append(f"- **{t}** {content}")
             lines.append("")
 
@@ -142,12 +147,68 @@ def _is_star(row, labels: dict) -> bool:
     return bool(focus) and sender in focus
 
 
-def _render_content(m: sqlite3.Row) -> str:
+#: 图片描述的进程内缓存：{msg_id: desc}（配合 vision 模块的磁盘缓存，避免重复调模型）
+_IMG_DESC_MEM: dict[str, str] = {}
+_IMG_DESC_LOADED = False
+
+
+def image_descriptions(msg_ids: list[str]) -> dict[str, str]:
+    """批量取图片描述（带磁盘缓存；仅在 `llm.image_understand` 开启时才会真调模型）。
+
+    只对**有图片明文**（`data/images/<msg_id>.jpg`）的消息调模型；没有的会返回空，
+    由 `_render_content` 标注"图未获取到内容"。
+    """
+    global _IMG_DESC_LOADED
+    if not msg_ids:
+        return {}
+    if not _IMG_DESC_LOADED:
+        try:
+            from consumer import vision
+            llm = _llm_cfg()
+            if vision.enabled(llm):
+                cache = vision.load_cache(PROJECT_DIR)
+                for k, v in cache.items():
+                    mid = str(k).split("|", 1)[0]
+                    if isinstance(v, str) and v.strip() and mid not in _IMG_DESC_MEM:
+                        _IMG_DESC_MEM[mid] = v.strip()
+        except Exception:  # noqa: BLE001
+            pass
+        _IMG_DESC_LOADED = True
+    todo = [m for m in msg_ids if m not in _IMG_DESC_MEM]
+    if todo:
+        try:
+            from consumer import vision
+            llm = _llm_cfg()
+            if vision.enabled(llm):
+                got = vision.describe_many(todo, PROJECT_DIR / "data" / "images",
+                                           PROJECT_DIR, llm)
+                _IMG_DESC_MEM.update(got)
+                # 记录"确实没有明文图"的，避免每轮重复尝试
+                for m in todo:
+                    _IMG_DESC_MEM.setdefault(m, "")
+        except Exception as e:  # noqa: BLE001
+            log.warning("图片理解失败（不影响归档）: %s", str(e)[:120])
+    return {m: _IMG_DESC_MEM.get(m, "") for m in msg_ids}
+
+
+def _llm_cfg() -> dict:
+    """读 config.yaml 的 llm 段（归档侧只需要它判断开关）。"""
+    try:
+        import yaml
+        import paths
+        cfg = yaml.safe_load(paths.config_path().read_text(encoding="utf-8")) or {}
+        return cfg.get("llm") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _render_content(m: sqlite3.Row, img_desc: str = "") -> str:
     """归档里每条消息的单行摘要。
 
     2026-10-07 起统一走 `consumer/cards.py`：图片/视频/链接/引用/文件不再只显示
     `[图片]` `[链接]`，而是带上尺寸、大小、标题、被引用的人与原话等 —— web 浏览页
     与归档用的是**同一个解析器**，不会两处不一致。
+    2026-10-08 起：有视觉模型描述的图片会把描述写进摘要（`img_desc`）。
     """
     from consumer import cards as cards_mod   # 局部 import：避免 consumer 内部循环依赖
 
@@ -155,6 +216,7 @@ def _render_content(m: sqlite3.Row) -> str:
         return cards_mod.summary_line(
             m["msg_type"], m["content"] or "",
             transcript=(m["transcript"] or ""),
+            image_desc=img_desc,
         )
     except Exception:  # noqa: BLE001
         # 解析器出问题也绝不能影响归档生成

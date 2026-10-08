@@ -267,8 +267,11 @@ def _parse_appmsg(raw: str, out: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------- 单行摘要
 
 def summary_line(msg_type: int | str, content: str, *, transcript: str = "",
-                 max_len: int = 160) -> str:
-    """给归档/总结用的**单行**摘要（图片/视频/链接都不再只显示 [类型]）。"""
+                 image_desc: str = "", max_len: int = 160) -> str:
+    """给归档/总结用的**单行**摘要（图片/视频/链接都不再只显示 [类型]）。
+
+    `image_desc`：该图片的视觉模型描述（有就写进摘要，让图参与理解）。
+    """
     d = parse(msg_type, content)
     kind = d.get("kind")
     if kind == "text":
@@ -295,6 +298,12 @@ def summary_line(msg_type: int | str, content: str, *, transcript: str = "",
         wh = f" {d['width']}×{d['height']}" if d.get("width") and d.get("height") else ""
         sz = f" · {d['size_h']}" if d.get("size_h") else ""
         s = f"[图片{wh}{sz}]"
+        # 有视觉模型的描述就用它 —— 图片能参与理解，而不是一行占位（2026-10-08）
+        desc = (image_desc or "").strip()
+        if desc:
+            s += f" 图意：{desc}"
+        else:
+            s += "（图未获取到内容）"
     elif kind == "video":
         wh = f" {d['width']}×{d['height']}" if d.get("width") and d.get("height") else ""
         sz = f" · {d['size_h']}" if d.get("size_h") else ""

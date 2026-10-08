@@ -126,7 +126,7 @@ def _load_rows(db_path: Path, start_ts: int, end_ts: int) -> list[sqlite3.Row]:
     try:
         return conn.execute(
             """
-            SELECT group_name, sender, content, msg_type, received_at, transcript
+            SELECT msg_id, group_name, sender, content, msg_type, received_at, transcript
             FROM messages
             WHERE received_at >= ? AND received_at < ?
             ORDER BY received_at ASC
@@ -158,6 +158,14 @@ def build_lines(rows: list[sqlite3.Row], labels: dict) -> dict[str, list[str]]:
     exclude = _exclude_types()
     monitored = _monitored_groups()
     out: dict[str, list[str]] = {}
+    # 图片理解：一次性取本批图片消息的描述（带缓存；仅在设置页开启时才调模型）
+    try:
+        from consumer.digest import image_descriptions
+        img_ids = [str(r["msg_id"]) for r in rows
+                   if int(r["msg_type"] or 0) == 3 and r["msg_id"]]
+        descs = image_descriptions(img_ids) if img_ids else {}
+    except Exception:  # noqa: BLE001
+        descs = {}
 
     for r in rows:
         if not _in_digest(r, labels, exclude, monitored):
@@ -170,7 +178,7 @@ def build_lines(rows: list[sqlite3.Row], labels: dict) -> dict[str, list[str]]:
         gname = ((labels.get("groups") or {}).get(gkey) or {}).get("name") or gkey
         sname = ((labels.get("senders") or {}).get(skey) or {}).get("name") or skey
 
-        body = _render_content(r).replace("\n", " ").strip()
+        body = _render_content(r, descs.get(str(r["msg_id"]), "")).replace("\n", " ").strip()
         # 重点人/重点群**不再被过滤**，而是打 ★ 标记交给模型加权（10-07 用户确认）
         star = "★" if _is_star(r, labels) else ""
         out.setdefault(gkey, []).append(
@@ -269,7 +277,7 @@ def collect_group_range(gid: str, start: str, end: str,
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            """SELECT group_name, sender, content, msg_type, received_at, transcript
+            """SELECT msg_id, group_name, sender, content, msg_type, received_at, transcript
                FROM messages
                WHERE group_name = ? AND received_at >= ? AND received_at < ?
                ORDER BY received_at""",
@@ -280,6 +288,14 @@ def collect_group_range(gid: str, start: str, end: str,
 
     lines: list[str] = []
     days: set[str] = set()
+    # 图片理解（阶段总结也一样带图意；带缓存、仅开启时调模型）
+    try:
+        from consumer.digest import image_descriptions
+        img_ids = [str(r["msg_id"]) for r in rows
+                   if int(r["msg_type"] or 0) == 3 and r["msg_id"]]
+        descs = image_descriptions(img_ids) if img_ids else {}
+    except Exception:  # noqa: BLE001
+        descs = {}
     for r in rows:
         if int(r["msg_type"] or 0) in exclude:
             continue
@@ -293,7 +309,7 @@ def collect_group_range(gid: str, start: str, end: str,
         skey = r["sender"] or "?"
         sname = ((labels.get("senders") or {}).get(skey) or {}).get("name") or skey
         star = "★" if _is_star(r, labels) else ""
-        body = _render_content(r).replace("\n", " ").strip()
+        body = _render_content(r, descs.get(str(r["msg_id"]), "")).replace("\n", " ").strip()
         lines.append(f"[{stamp}]{star}{sname}（{_type_label(int(r['msg_type'] or 0))}）：{body}")
 
     meta = {"count": len(lines), "start": start, "end": end, "days": sorted(days)}
