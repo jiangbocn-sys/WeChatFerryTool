@@ -153,9 +153,50 @@ check("失败后安排延迟重试", "_schedule_voice_retry" in src_code)
 check("延迟重试有多次尝试", "60, 180, 600" in inspect.getsource(Consumer._schedule_voice_retry))
 check("解码+转写抽成公共方法（重试复用）", "_decode_and_transcribe" in src_code)
 
+print("\n[G] Bug 修复：多条语音不再抢同一个文件（2026-10-08 实测到的严重 bug）")
+# 现象：三条**时长/aeskey 都不同**的语音被转写成同一段文字 ——
+# 因为它们共享 `since = now-120s` 窗口，各自都取到了"窗口内最新"的同一个文件。
+from consumer.voice import capture_voice  # noqa: E402
+
+vroot = SC / "gsrc"
+vtmp = vroot / "cache" / "2026-10" / "Message" / h / "VoiceTemp"
+vtmp.mkdir(parents=True)
+base_ts = int(time.time())
+for i, off in enumerate((-8, -4, 0)):                 # 三条语音，时间戳各不同
+    (vtmp / f"{500 + i}_{base_ts + off}").write_bytes(bytes([i]) * (1000 + i))
+
+dest = SC / "gdest"
+dest.mkdir(parents=True, exist_ok=True)
+picked = []
+for i, off in enumerate((-8, -4, 0)):
+    picked.append(capture_voice(vroot, GID, f"g{i}", dest, wait_s=0.6, fresh_s=180,
+                                near_ts=base_ts + off, tol_s=10))
+check("三条消息都抓到了文件", all(p is not None for p in picked),
+      str([p.name if p else None for p in picked]))
+names = [p.name if p else "" for p in picked]
+check("**各自抓到不同的文件**（不再共享同一个）", len(set(names)) == 3, str(names))
+check("抓到的内容与各自的时间戳对应",
+      all((dest / n).read_bytes()[0] == i for i, n in enumerate(names)),
+      str([(dest / n).read_bytes()[0] for n in names]))
+p_far = capture_voice(vroot, GID, "gfar", dest, wait_s=0.5, fresh_s=180,
+                      near_ts=base_ts + 9999, tol_s=10)
+check("时间对不上时返回 None（不张冠李戴）", p_far is None, str(p_far))
+
+print("\n[H] VoiceTap.recent/wait_for 的'取走即消费'语义")
+from consumer.voice_tap import VoiceTap  # noqa: E402
+import time as _t  # noqa: E402
+tap = VoiceTap(SC / "fake_account", SC / "tapout")
+_p = vtmp / f"900_{base_ts + 1}"
+_p.write_bytes(b"z" * 900)
+tap._captures.append((h, _p, _t.time()))
+first = tap.recent(h, since=_t.time() - 60)
+second = tap.recent(h, since=_t.time() - 60)
+check("第一次能拿到", first is not None, str(first))
+check("**第二次拿到 None**（同一文件不会被第二条消息重用）", second is None, str(second))
+
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)
 if FAILS:
     print("FAILED:", FAILS)
     sys.exit(1)
-print("语音漏抓补偿（扫盘 / 延迟重试 / 配对补转）验证通过")
+print("语音漏抓补偿（扫盘 / 延迟重试 / 配对补转 / 不张冠李戴）验证通过")

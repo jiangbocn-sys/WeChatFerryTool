@@ -119,7 +119,24 @@ check("图片摘要带尺寸与大小", "214×480" in lines["图片"] and "478 K
 check("引用摘要带被引用人与原话",
       "春之语" in lines["引用"] and "明堂象个三角形" in lines["引用"], lines["引用"])
 check("链接摘要带标题", "邀请你观看直播" in lines["链接"], lines["链接"])
-check("语音摘要优先用转写", lines["语音(有转写)"] == "[语音] 今天下午开会", lines["语音(有转写)"])
+check("语音摘要优先用转写（带时长）",
+      lines["语音(有转写)"] == "[语音 5秒] 今天下午开会", lines["语音(有转写)"])
+# 2026-10-08：无转写时要**明确说明状态**，不能只给 `[语音 ~13s]`
+# （模型看不懂 `~`，也分不清"没抓到文件"和"待转写"）
+check("未转写语音明确标注'内容不可得'",
+      "内容不可得" in lines["语音"] and "5秒" in lines["语音"], lines["语音"])
+check("未捕获到文件时说明原因",
+      "未获取到语音文件" in cards.summary_line(34, '<msg voicelength="5200" />',
+                                                transcript="[未捕获到语音文件]"),
+      cards.summary_line(34, '<msg voicelength="5200" />', transcript="[未捕获到语音文件]"))
+check("解码失败时单独说明",
+      "解码失败" in cards.summary_line(34, '<msg voicelength="5200" />',
+                                       transcript="[解码失败]"),
+      cards.summary_line(34, '<msg voicelength="5200" />', transcript="[解码失败]"))
+check("待转写时标注'待转写'",
+      "待转写" in cards.summary_line(34, '<msg voicelength="5200" />',
+                                     transcript="[待转写]"),
+      cards.summary_line(34, '<msg voicelength="5200" />', transcript="[待转写]"))
 check("**所有摘要都不含 XML 特征**",
       not any(("<?xml" in v or "aeskey" in v or "<appmsg" in v or "cdnthumb" in v)
               for v in lines.values()),

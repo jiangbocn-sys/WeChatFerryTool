@@ -110,12 +110,22 @@ def capture_voice(
     wait_s: float = 20.0,
     fresh_s: float = 180.0,
     poll_interval: float = 0.5,
+    near_ts: int | None = None,
+    tol_s: int = 30,
 ) -> Optional[Path]:
-    """在 VoiceTemp 里等待并抓取新出现的语音文件（微信会清理临时文件）。
+    """在 VoiceTemp 里等待并抓取**属于这条消息的**语音文件（微信会清理临时文件）。
 
     :param conv_id: 会话 ID（group roomid 或私聊对方 wxid，= 消息的 group_name）
     :param fresh_s: 只接受最近 fresh_s 秒内被写入的文件（避免抓到旧残留）
+    :param near_ts: 该消息的秒级时间戳。**强烈建议传** —— VoiceTemp 文件名后缀就是语音的
+        秒级时间戳，用它把"时间最接近"的文件挑出来；不传就只能取最新的，
+        短时间内多条语音会抢同一个文件。
+    :param tol_s: 与 `near_ts` 的允许差值（秒）。
     :return: 复制到的目标路径；失败返回 None
+
+    ⚠️ 2026-10-08 修的严重 bug：原来只按"最新"取、且取完不记账，
+    导致**三条时长/aeskey 完全不同的语音**被配到同一个文件、转写成同一段文字（内容全错）。
+    现在改为"按时间戳最接近 + 取走即记账（同一文件不再给第二条消息）"。
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + wait_s
@@ -123,23 +133,41 @@ def capture_voice(
         now = time.time()
         for vt in _voicetemp_dirs(account_dir, conv_id):
             try:
-                files = [
-                    f for f in vt.iterdir()
-                    if f.is_file()
-                    and now - f.stat().st_mtime < fresh_s
-                    and f"{f}|{f.stat().st_mtime_ns}" not in _captured_sources
-                ]
+                cands = []
+                for f in vt.iterdir():
+                    if not f.is_file():
+                        continue
+                    st = f.stat()
+                    if now - st.st_mtime >= fresh_s:
+                        continue
+                    if f"{f}|{st.st_mtime_ns}" in _captured_sources:
+                        continue
+                    cands.append((f, st))
             except OSError:
                 continue
-            if not files:
+            if not cands:
                 continue
-            newest = max(files, key=lambda f: f.stat().st_mtime)
-            suffix = newest.suffix or ".bin"
+            # 挑"与消息时间最接近"的文件；没有 near_ts 时退回"最新"
+            if near_ts:
+                def _dist(item):
+                    f, _st = item
+                    try:
+                        return abs(int(f.name.split("_")[-1]) - int(near_ts))
+                    except (ValueError, IndexError):
+                        return 10 ** 9
+                cands.sort(key=_dist)
+                best, best_st = cands[0]
+                if _dist((best, best_st)) > tol_s:
+                    time.sleep(poll_interval)
+                    continue                     # 时间对不上，继续等（别的文件可能稍后出现）
+            else:
+                best, best_st = max(cands, key=lambda it: it[1].st_mtime)
+            suffix = best.suffix or ".bin"
             dest = dest_dir / f"{msg_id}{suffix}"
             try:
-                shutil.copy2(newest, dest)
-                _captured_sources[f"{newest}|{newest.stat().st_mtime_ns}"] = now
-                log.info("语音已捕获: %s -> %s (%d bytes)", newest.name, dest, dest.stat().st_size)
+                shutil.copy2(best, dest)
+                _captured_sources[f"{best}|{best_st.st_mtime_ns}"] = now
+                log.info("语音已捕获: %s -> %s (%d bytes)", best.name, dest, dest.stat().st_size)
                 return dest
             except OSError as e:
                 log.warning("复制语音文件失败: %s", e)

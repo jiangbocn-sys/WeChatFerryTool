@@ -68,6 +68,8 @@ class VoiceTap:
         self._lock = threading.Lock()
         self._captures: deque[tuple[str, Path, float]] = deque(maxlen=100)  # (conv_hash, path, epoch)
         self._seen: set[str] = set()
+        # 已被某条消息取走的捕获路径（防止多条消息共享同一个文件 → 转写全错）
+        self._claimed: set[str] = set()
         self._observer: Optional[Observer] = None
 
     # ---- 认领（消息事件匹配后调用；或孤儿处理完成后调用）----
@@ -162,14 +164,25 @@ class VoiceTap:
 
     # ---- 查询（供消息事件匹配） ----
     def recent(self, h: str, since: float) -> Optional[Path]:
+        """取该会话 `since` 之后、**尚未被取走**的最新捕获。
+
+        ⚠️ 取走后会记账（`_claimed`），同一文件**不会再给第二条消息** ——
+        否则短时间内到达的多条语音会全部配到同一个文件上，转写结果全错
+        （2026-10-08 实测：三条**时长/aeskey 都不同**的语音被转写成同一段文字，
+         根因就是这个"窗口内返回最新文件但不消费"的语义）。
+        """
         with self._lock:
             for ch, path, ts in reversed(self._captures):
                 if ch == h and ts >= since and path.exists():
+                    key = str(path)
+                    if key in self._claimed:
+                        continue
+                    self._claimed.add(key)
                     return path
         return None
 
     def wait_for(self, h: str, since: float, timeout_s: float = 20.0) -> Optional[Path]:
-        """等这个会话出现新捕获（含 since 之后已捕获的）。"""
+        """等这个会话出现**可用的新捕获**（含 since 之后已捕获、且未被取走的）。"""
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             p = self.recent(h, since)

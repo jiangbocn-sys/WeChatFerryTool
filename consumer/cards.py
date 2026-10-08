@@ -275,10 +275,22 @@ def summary_line(msg_type: int | str, content: str, *, transcript: str = "",
         s = d.get("text", "")
     elif kind == "voice":
         t = (transcript or "").strip()
+        dur = d.get("duration") or 0
+        dur_s = f"{dur}秒" if dur else "时长未知"
         if t and not t.startswith(("[待转写]", "[解码失败]", "[未捕获")):
-            s = f"[语音] {t}"
+            s = f"[语音 {dur_s}] {t}"
+        elif t.startswith("[解码失败]"):
+            # 拿到了文件但 silk 解不开
+            s = f"[语音 {dur_s}·解码失败，内容不可得]"
+        elif t.startswith("[未捕获"):
+            # 微信没把语音文件落到本地（PC 微信的语音是服务器按需拉流，见
+            # docs/wechat-media-forensics.md）—— 明确告诉模型"这里有内容但拿不到"，
+            # 免得它把占位符当成一句怪话，或硬猜内容。
+            s = f"[语音 {dur_s}·未获取到语音文件，内容不可得]"
+        elif t.startswith("[待转写]"):
+            s = f"[语音 {dur_s}·待转写]"
         else:
-            s = f"[语音 ~{d.get('duration') or '?'}s]"
+            s = f"[语音 {dur_s}·未转写，内容不可得]"
     elif kind == "image":
         wh = f" {d['width']}×{d['height']}" if d.get("width") and d.get("height") else ""
         sz = f" · {d['size_h']}" if d.get("size_h") else ""

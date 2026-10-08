@@ -542,25 +542,32 @@ class Consumer:
             log.info("孤儿语音归档: 会话=%s 文件=%d bytes 文字=%s",
                      conv_id or key, size, (text or "(未转写)")[:60])
 
-    def _capture_voice_bg(self, conv_id: str, msg_id: str) -> None:
+    def _capture_voice_bg(self, conv_id: str, msg_id: str, near_ts: int | None = None) -> None:
         """后台线程：抓取语音文件 → silk 解码 → ASR 转写 → 落库。
 
-        三级兜底（2026-10-07 加强，原来只有前两级，实测漏抓 16/32）：
+        三级兜底（2026-10-07 加强）：
           ① VoiceTap 事件捕获（毫秒级、覆盖收发双向）
-          ② 老的 VoiceTemp 轮询 `capture_voice()`
+          ② 老的 VoiceTemp 轮询 `capture_voice()`（按时间戳挑最接近的文件）
           ③ **超时后直接扫 VoiceTemp 目录**（迟落盘/事件漏掉的场景，文件其实还在）
-        仍然失败时先落 `[未捕获到语音文件]`，再排一个**延迟重试** ——
-        有的语音要等你在微信里点一下播放、或微信过一会儿才落盘。
+        仍失败时先落 `[未捕获到语音文件]`，再排一个**延迟重试**。
+
+        ⚠️ `near_ts`（该消息的秒级时间戳）**必须传**：VoiceTemp 文件名后缀就是语音的时间戳，
+        用它挑"时间最接近"的文件，才能避免**多条语音抢同一个文件 → 转写内容全错**
+        （2026-10-08 实测：三条时长/aeskey 完全不同的语音被转写成同一段文字）。
         """
         try:
             path = None
             raw_path = None
             h = conv_hash(conv_id) if self.voice_tap is not None else ""
-            since = time.time() - 120
+            # 只接受"消息时间附近"的捕获：窗口从 120 秒收紧到 30 秒（原来太宽，
+            # 会让同一窗口内的多条语音共享同一个文件）
+            since = (near_ts - 30) if near_ts else (time.time() - 30)
             if self.voice_tap is not None:
+                # wait_for 现在带"取走即记账"，同一文件不会再给第二条消息
                 path = self.voice_tap.wait_for(h, since=since, timeout_s=20)
             if path is None:
-                path = capture_voice(self.wechat_dir, conv_id, msg_id, self.voice_dir)
+                path = capture_voice(self.wechat_dir, conv_id, msg_id, self.voice_dir,
+                                     near_ts=near_ts, tol_s=30)
             if path is None and self.voice_tap is not None:
                 # ③ 扫盘补偿：事件没收到的、或迟落盘的，文件往往还在 VoiceTemp 里
                 p = self.voice_tap.scan_temp(h, since=since)
@@ -571,7 +578,7 @@ class Consumer:
                 self.store.update_transcript(msg_id, "[未捕获到语音文件]")
                 log.warning("语音未捕获（三级兜底都没拿到），排延迟重试: conv=%s msg=%s",
                             conv_id, msg_id)
-                self._schedule_voice_retry(conv_id, msg_id)
+                self._schedule_voice_retry(conv_id, msg_id, near_ts=near_ts)
                 return
             if path.parent.name == "raw":
                 raw_path = path
@@ -618,27 +625,38 @@ class Consumer:
             self.store.update_transcript(msg_id, "[待转写]")
 
     def _schedule_voice_retry(self, conv_id: str, msg_id: str,
-                              delays: tuple[int, ...] = (60, 180, 600)) -> None:
+                              delays: tuple[int, ...] = (60, 180, 600),
+                              near_ts: int | None = None) -> None:
         """延迟重试若干次（默认 1/3/10 分钟后各一次）：扫盘 → 解码 → 转写 → 落库。
 
         为什么需要：语音文件是**微信按需落盘**的 —— 你没点播放、或点得晚，
-        文件就不在 VoiceTemp 里；20 秒的窗口必然错过。重试期间若用户在微信里点了播放，
-        文件一出现就能补上。成功即停（避免无谓的重复解码）。
-        """
+        文件就不在 VoiceTemp 里；20 秒的窗口必然错过。重试期间文件一出现就能补上。
+        成功即停（避免无谓的重复解码）。
 
+        ⚠️ `near_ts` 用于挑"时间最接近该消息"的文件；**不再用 `time.time()-3600` 这种宽窗口**
+        （那会把别的语音的文件捞过来，导致转写内容张冠李戴）。
+        """
         def worker() -> None:
             h = conv_hash(conv_id) if self.voice_tap is not None else ""
+            since = (near_ts - 30) if near_ts else (time.time() - 30)
             for d in delays:
                 time.sleep(d)
                 if self.voice_tap is None or not h:
                     return
                 try:
-                    row = self.store.get_transcript(msg_id) if hasattr(self.store, "get_transcript") else None
-                    if row and row not in ("[未捕获到语音文件]", ""):
+                    cur = self.store.get_transcript(msg_id)
+                    if cur and not cur.startswith("[未捕获") and not cur.startswith("[解码失败]"):
                         return                      # 已被别处补上了
-                    p = self.voice_tap.scan_temp(h, since=time.time() - 3600)
+                    p = self.voice_tap.scan_temp(h, since=since)
                     if p is None:
                         continue
+                    # 时间戳对不上就跳过（避免张冠李戴）
+                    if near_ts:
+                        try:
+                            if abs(int(p.name.split("_")[-1]) - near_ts) > 30:
+                                continue
+                        except (ValueError, IndexError):
+                            continue
                     dest = self._adopt_temp(p, msg_id)
                     if dest is None:
                         continue
@@ -895,7 +913,9 @@ class Consumer:
             if msg_type == 34 and self.voice_enabled and self.wechat_dir:
                 threading.Thread(
                     target=self._capture_voice_bg,
-                    args=(group_name, msg_id),
+                    # 传消息时间戳：VoiceTemp 文件名后缀就是语音时间戳，用它挑最接近的文件，
+                    # 否则短时间内多条语音会抢同一个文件（2026-10-08 修）
+                    args=(group_name, msg_id, int(msg.get("timestamp") or 0) or None),
                     daemon=True,
                     name="voice-capture",
                 ).start()
