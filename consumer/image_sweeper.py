@@ -39,8 +39,26 @@ from pathlib import Path
 
 log = logging.getLogger("consumer.image_sweeper")
 
-# 明文媒体所在的缓存子目录 → 扩展名
-CACHE_DIRS = {"Thumb": ".jpg", "ImageTemp": ".img"}
+#: 已知放明文图的缓存子目录（**仅供参考/日志**，实际扫描不限于它们）
+KNOWN_DIRS = ("Thumb", "ImageTemp")
+#: 可直接认的图片扩展名
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+#: 微信临时图文件名里的标记（`<序号>_<秒级时间戳>_hd_temp` / `_thumb_temp` / `_mid_temp_convert`）
+TEMP_MARKERS = ("_hd_temp", "_thumb_temp", "_mid_temp")
+
+
+def _looks_like_image_file(name: str) -> bool:
+    """判断缓存里的一个文件名是否"像明文图"，值得抢下来。
+
+    2026-10-08：原先只扫 `Thumb`/`ImageTemp` 两个固定目录，会漏掉
+    `<n>_<ts>_hd_temp`、`<n>_<ts>_thumb_temp` 这类**无扩展名的临时图**
+    （实测见过 400 KB 的 `_hd_temp`，比缩略图大得多，转瞬即逝）。
+    现在改成按"像不像图"识别：有图片扩展名，**或**命中微信的临时图命名标记。
+    """
+    low = name.lower()
+    if any(low.endswith(e) for e in IMG_EXTS):
+        return True
+    return any(m in low for m in TEMP_MARKERS)
 
 
 class ImageSweeper:
@@ -69,8 +87,9 @@ class ImageSweeper:
             return False
         self._thread = threading.Thread(target=self._loop, name="image-sweeper", daemon=True)
         self._thread.start()
-        log.info("ImageSweeper 已启动（每 %.1fs 扫 %s 的 %s，抢存明文缩略图到 %s）",
-                 self.interval_s, self.cache_dir, "/".join(CACHE_DIRS), self.out_dir)
+        log.info("ImageSweeper 已启动（每 %.1fs 扫 %s 下**所有**会话子目录，抢存明文图到 %s；"
+                 "已知目录 %s）", self.interval_s, self.cache_dir,
+                 self.out_dir, "/".join(KNOWN_DIRS))
         return True
 
     def stop(self) -> None:
@@ -102,16 +121,21 @@ class ImageSweeper:
             except OSError:
                 continue
             for cdir in convs:
-                for sub, ext in CACHE_DIRS.items():
-                    d = cdir / sub
-                    if not d.is_dir():
-                        continue
+                # ⚠️ 扫该会话下的**所有**子目录，不只 Thumb/ImageTemp ——
+                # `<n>_<ts>_hd_temp` 这类临时图可能落在别的目录里；由文件名判断是否像图。
+                try:
+                    subs = [d for d in cdir.iterdir() if d.is_dir()]
+                except OSError:
+                    continue
+                for d in subs:
                     try:
                         files = list(d.iterdir())
                     except OSError:
                         continue
                     for f in files:
                         if not f.is_file():
+                            continue
+                        if not _looks_like_image_file(f.name):
                             continue
                         ts = self._ts_of(f.name)
                         if ts is None:
@@ -127,7 +151,10 @@ class ImageSweeper:
                             # ⚠️ 微信的临时文件常常**没有扩展名**（如 `<n>_<ts>_hd_temp`、
                             # `<n>_<ts>_thumb_temp`），它们在内容上仍是 JPEG。
                             # 若原样保留 `.img` 之类，后续 PIL 会打不开（踩过）→ 统一成 .jpg。
-                            ext_out = f.suffix if f.suffix.lower() in (".jpg", ".jpeg", ".png") else ".jpg"
+                            ext_out = (f.suffix.lower()
+                                       if f.suffix.lower() in IMG_EXTS else ".jpg")
+                            if ext_out == ".jpeg":
+                                ext_out = ".jpg"
                             dest = self.out_dir / f"{cdir.name}_{ts}{ext_out}"
                             shutil.copy2(f, dest)
                         except OSError:
@@ -138,8 +165,8 @@ class ImageSweeper:
                             self._saved[(cdir.name, ts)] = (dest, now)
                         saved += 1
                         self.stats["saved"] += 1
-                        log.info("ImageSweeper 抢到明文图片: %s (%d B) 会话=%s…",
-                                 f.name, st.st_size, cdir.name[:12])
+                        log.info("ImageSweeper 抢到明文图片: %s (%d B) 会话=%s… 目录=%s",
+                                 f.name, st.st_size, cdir.name[:12], d.name)
         self._prune(now)
         return saved
 

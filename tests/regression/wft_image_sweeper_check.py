@@ -85,8 +85,45 @@ print("\n[B] 时间戳解析（两种文件名格式）")
 check("解析 _thumb.jpg", ImageSweeper._ts_of(f"752_{NOW - 20}_thumb.jpg") == NOW - 20)
 check("解析 _mid_temp_convert",
       ImageSweeper._ts_of(f"192_{NOW - 30}_mid_temp_convert") == NOW - 30)
+check("解析 _hd_temp", ImageSweeper._ts_of(f"462_{NOW - 40}_hd_temp") == NOW - 40)
+check("解析 _thumb_temp", ImageSweeper._ts_of(f"464_{NOW - 50}_thumb_temp") == NOW - 50)
 check("非时间戳返回 None", ImageSweeper._ts_of("123_short.jpg") is None)
 check("纯名字返回 None", ImageSweeper._ts_of("readme.txt") is None)
+
+print("\n[B2] 文件识别：认得无扩展名临时图，拒绝非图（2026-10-08 扩展）")
+from consumer.image_sweeper import _looks_like_image_file  # noqa: E402
+for name, want in (("752_1791373582_thumb.jpg", True),
+                   ("462_1791431348_hd_temp", True),
+                   ("464_1791431606_thumb_temp", True),
+                   ("192_1791267515_mid_temp_convert", True),
+                   ("icon.png", True),
+                   ("x_b.dat", False),
+                   ("readme.txt", False),
+                   ("foo.mp4", False)):
+    check(f"识别 {name}", _looks_like_image_file(name) is want)
+
+print("\n[B3] 扫描不限于 Thumb/ImageTemp：别的子目录里的 _hd_temp 也要抢")
+# 用**独立**的假账号目录（往共享目录里塞文件会污染后面 [E] 的数量断言）
+acc_b3 = SC / "acc_b3"
+other = acc_b3 / "cache" / "2026-10" / "Message" / GHASH / "SendTemp"
+other.mkdir(parents=True, exist_ok=True)
+hd = other / f"900_{NOW - 5}_hd_temp"
+hd.write_bytes(b"\xff\xd8\xff\xe0" + b"h" * 400000)
+# 同时放一个非图文件，应该被拒绝
+(other / "not_image.dat").write_bytes(b"\x07\x08\x56\x32" + b"n" * 500)
+out_b3 = SC / "data" / "images" / "swept_b3"
+sw_b3 = ImageSweeper(acc_b3, out_b3, interval_s=3.0)
+sw_b3.scan_once()
+check("抢到了别的目录里的临时图",
+      any(abs(ts - (NOW - 5)) < 2 for _h, ts, _p in sw_b3.pending()),
+      str([(ts - NOW) for _h, ts, _p in sw_b3.pending()][:6]))
+check("只抢到 1 个（.dat 被拒绝）", len(sw_b3.pending()) == 1, str(len(sw_b3.pending())))
+check("抢到的文件名以 .jpg 结尾（无扩展名临时图统一成 .jpg）",
+      all(p.suffix == ".jpg" for _h, _t, p in sw_b3.pending()),
+      str([p.suffix for _h, _t, p in sw_b3.pending()][:6]))
+check("大文件完整复制（约 400 KB）",
+      any(p.stat().st_size > 400000 for _h, _t, p in sw_b3.pending()),
+      str(sorted(p.stat().st_size for _h, _t, p in sw_b3.pending())[-1:]))
 
 print("\n[C] _prune 按抢存时刻计时")
 check("刚抢到的都还在", len(sw.pending()) == 3, str(len(sw.pending())))
