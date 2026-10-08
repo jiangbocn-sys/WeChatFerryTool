@@ -113,6 +113,14 @@ check("并列时结果稳定（同一输入两次一致）",
 check("只匹配指定类型（不返回语音/文本）",
       st.message_near(GID, NOW - 20, msg_type=3, tol_s=5) == "img1")
 check("容差外返回 None", st.message_near(GID, NOW + 9999, msg_type=3, tol_s=30) is None)
+# ⚠️ 实测口径（2026-10-08）：真能配上的缩略图，其文件名时间戳与消息 received_at
+#    差值约 **9 秒**；而**旧的、我们没收到的消息**的缩略图（库里 ±10 分钟无消息）
+#    自然配不上 —— 所以"配对率低"是数据决定的，不是 bug。
+check("±9 秒的真实差值能配上（模拟实测样本）",
+      st.message_near(GID, NOW - 10 + 9, msg_type=3, tol_s=30) in ("img2", "other_img", "img1"),
+      str(st.message_near(GID, NOW - 10 + 9, msg_type=3, tol_s=30)))
+check("库里没有对应消息时返回 None（旧缩略图的情形）",
+      st.message_near(GID, NOW - 100000, msg_type=3, tol_s=90) is None)
 st.insert_message(msg_id="other_img", group_name="other@chatroom", sender="wxid_a",
                   sender_id="wxid_a", content="x", msg_type=3, received_at=NOW - 20,
                   direction="in")
