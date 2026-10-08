@@ -128,7 +128,10 @@ check("保留窗口最老的一天（29 天前）没被删",
       int(sqlite3.connect(str(db)).execute(
           "SELECT COUNT(*) FROM messages WHERE received_at < ?",
           (START_TODAY - 29 * DAY,)).fetchone()[0]) == 0)
-check("第 30 天起的记录确实没了", cleanup.count_older(db, 30) == 0)
+# ⚠️ 必须传 now=NOW（固定 10-07）：count_older 默认用**真实当前时间**，
+#    测试跨过午夜（10-07 → 10-08）后门槛会前移一天，原本"正好 30 天"的记录变成 31 天，
+#    断言就会莫名其妙挂掉（2026-10-08 踩到）。
+check("第 30 天起的记录确实没了", cleanup.count_older(db, 30, now=NOW) == 0)
 check("有 checkpoint 调用（A8）", real.checkpointed is True)
 check("没开 vacuum 就不 VACUUM（A8）", real.vacuumed is False)
 check("状态文件写了 last_date（A4）",

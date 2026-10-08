@@ -157,6 +157,27 @@
   以及**排查方法论**（snapshot diff / 控制变量 / 输出写文件 / 别过早下定论）
   整理成可直接复用的笔记。**后续要做图片或语音，先读这一篇，别重新踩一遍。**
 
+* **⭐ 图片/语音明文就在缓存里，已实现两个常驻巡检器（10-08 重大进展）**：
+  用户质疑"微信应该是把图片读进内存、新消息也先进内存再处理"（逻辑上对），
+  但实测**内存里抓不到聊天图**（见下条），而**缓存的明文更稳**：
+  * **图片**：`cache\<月>\Message\<会话md5>\Thumb\<序号>_<秒级时间戳>_thumb.jpg`
+    是**明文 JPEG**（头 `ff d8 ff e0`，7 KB~163 KB，实测含 **540x720 真聊天图**）；
+    另有 `ImageTemp\<n>_<ts>_mid_temp_convert`。文件名带秒级时间戳 →
+    与消息 `received_at` 配对**差值 9 秒**即对上。
+  * **语音**：`VoiceTemp\<序号>_<秒级时间戳>`（无扩展名，见语音条目）。
+  * ⚠️ **微信会清理**（实测同批文件几分钟内消失）→ **必须常驻巡检"出现即抢"**。
+  实现：`consumer/image_sweeper.py`（`ImageSweeper`）与 `consumer/voice_sweeper.py`
+  （`VoiceSweeper`），都由 `Consumer.__init__` 起后台线程；
+  配对循环 `_image_pair_loop` / `_sweeper_pair_loop` 按"会话 md5 + 时间戳"反查消息，
+  图片存成 **`<data>/data/images/<msg_id>.jpg`** → **归档/总结可按消息直接引用图片**。
+  新增 `store.message_near()`（按会话+类型+时间最近找消息）与
+  `store.voice_needing_transcript()`（只找未转写的语音）。
+  ⚠️ 踩坑：① `_prune` 一度按**源文件 mtime** 计时，导致"昨天遗留、今天才扫到"的文件
+  被立刻删掉 → 改为按**抢存时刻**；② 时间并列时排序要加次级键（`msg_id`）才稳定。
+  回归：`wft_image_sweeper_check`（抢存/解析/清理/配对/接线）、`wft_voice_sweeper_check`；
+  ⚠️ 另修 `wft_retention_check` 的**日期漂移脆弱**：它调用 `cleanup.count_older(db, 30)`
+  用**真实当前时间**，跨过午夜（10-07→10-08）后门槛前移一天导致断言挂 —— 已改为传固定 `now`。
+
 * **内存验证结论（10-07 用户批准，A/B 两线）**：目标是判断"自研 DLL 拿媒体"值不值得投入。
   1. **图片：内存里确实有明文** —— `tools/scan_wechat_memory.py` 只读扫微信主进程，
      命中 **JPEG 94 处 / PNG 14 处**；`tools/dump_wechat_memory_media.py` dump 后

@@ -142,6 +142,46 @@ class Store:
             ).fetchone()
         return str(row[0] or "") if row else ""
 
+    def voice_needing_transcript(self, conv_id: str, near_ts: int,
+                                 tol_s: int = 60) -> list[tuple[str, int]]:
+        """找该会话在 `near_ts` 附近、**还没转写**的语音消息：[(msg_id, received_at)]。
+
+        给 `VoiceSweeper` 配对用：巡检器抢到语音文件（文件名带秒级时间戳）后，
+        用它反查"这条文件属于哪条语音消息"。
+        只返回真正的"待处理"状态（NULL/空/占位符），已转写的不会再被覆盖。
+        """
+        lo, hi = int(near_ts) - tol_s, int(near_ts) + tol_s
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT msg_id, received_at FROM messages
+                   WHERE msg_type = 34 AND group_name = ?
+                     AND received_at BETWEEN ? AND ?
+                     AND (transcript IS NULL OR transcript = ''
+                          OR transcript LIKE '[未捕获%' OR transcript LIKE '[解码失败]%'
+                          OR transcript LIKE '[待转写]%')
+                   ORDER BY ABS(received_at - ?)""",
+                (conv_id, lo, hi, int(near_ts)),
+            ).fetchall()
+        return [(str(r[0]), int(r[1] or 0)) for r in rows]
+
+    def message_near(self, conv_id: str, near_ts: int, msg_type: int = 3,
+                     tol_s: int = 60) -> str | None:
+        """找该会话在 `near_ts` 附近、指定类型的消息 → msg_id。
+
+        给 `ImageSweeper` 配对用：微信的明文缩略图文件名带秒级时间戳
+        （`Thumb/<序号>_<ts>_thumb.jpg`），可据此反查它属于哪条图片消息。
+        """
+        lo, hi = int(near_ts) - tol_s, int(near_ts) + tol_s
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT msg_id FROM messages
+                   WHERE msg_type = ? AND group_name = ?
+                     AND received_at BETWEEN ? AND ?
+                   ORDER BY ABS(received_at - ?), msg_id LIMIT 1""",
+                (int(msg_type), conv_id, lo, hi, int(near_ts)),
+            ).fetchone()
+        return str(row[0]) if row else None
+
     def mark_pushed(self, msg_id: str) -> None:
         with self._lock:
             self._conn.execute(

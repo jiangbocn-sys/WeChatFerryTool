@@ -35,6 +35,8 @@ from consumer.sent_tracker import SentTracker
 from consumer.store import Store
 from consumer.voice import capture_voice, decode_to_wav, find_wechat_files_dir
 from consumer.voice_tap import VoiceTap, conv_hash
+from consumer.voice_sweeper import VoiceSweeper
+from consumer.image_sweeper import ImageSweeper
 
 from paths import config_path, data_root
 
@@ -209,8 +211,12 @@ class Consumer:
         log.info("入库类型闸门：排除类型 %s（表情 47 恒排除）",
                  sorted(self.ingest_exclude_types))
         self.voice_dir = PROJECT_DIR / (voice_cfg.get("dir") or "data/voices")
+        # 明文图片（从缓存 Thumb 抢到的）+ 消息归档，供总结/归档按 msg_id 引用
+        self.image_dir = PROJECT_DIR / "data" / "images"
         self.wechat_dir = None
         self.voice_tap: VoiceTap | None = None
+        self.voice_sweeper: VoiceSweeper | None = None
+        self.image_sweeper: ImageSweeper | None = None
         if self.voice_enabled:
             self.wechat_dir = find_wechat_files_dir(self.self_wxid)
             if self.wechat_dir:
@@ -218,6 +224,17 @@ class Consumer:
                 # 事件驱动全局监听（毫秒级捕获，覆盖收/发两个方向）
                 self.voice_tap = VoiceTap(self.wechat_dir, self.voice_dir / "raw")
                 self.voice_tap.start()
+                # 常驻巡检器：不管消息事件，**持续**扫 VoiceTemp 抢存短暂出现的语音文件
+                #（2026-10-08 实测：事件捕获当天 0 命中、20 秒轮询 11 条只中 1 条；
+                #  而那条用户既没播放、窗口也没开 → 文件是微信自动写、存留极短，
+                #  所以必须"主动持续抢"而不是"被动等"）
+                self.voice_sweeper = VoiceSweeper(self.wechat_dir, self.voice_dir / "swept")
+                self.voice_sweeper.start()
+                # 图片巡检器：抢存缓存里的**明文缩略图**
+                #（cache\<月>\Message\<会话md5>\Thumb\<n>_<秒级ts>_thumb.jpg，
+                #  实测含 540x720 的真聊天图；微信会清理，必须出现即抢）
+                self.image_sweeper = ImageSweeper(self.wechat_dir, self.image_dir / "swept")
+                self.image_sweeper.start()
             else:
                 log.warning("语音捕获已启用但找不到微信数据目录（xwechat_files），功能不可用")
 
@@ -237,6 +254,17 @@ class Consumer:
         if self.voice_tap is not None and self.asr.ready:
             threading.Thread(target=self._orphan_sweeper_loop, name="voice-orphan", daemon=True).start()
             log.info("孤儿语音处理已启用（自己发出的语音也会转写归档）")
+
+        # 巡检器配对：把抢到的语音文件按时间戳配回"还没转写"的语音消息并补转写
+        if self.voice_sweeper is not None and self.asr.ready:
+            threading.Thread(target=self._sweeper_pair_loop, name="voice-pair", daemon=True).start()
+            log.info("语音巡检配对已启用（VoiceTemp 抢到的文件会按时间戳补转写）")
+
+        # 图片配对：把抢到的**明文缩略图**按时间戳配回图片消息，存成 <msg_id>.jpg
+        # → 归档/总结里就能按消息直接引用图片（卦例截图这类关键图不再丢）
+        if self.image_sweeper is not None:
+            threading.Thread(target=self._image_pair_loop, name="image-pair", daemon=True).start()
+            log.info("图片巡检配对已启用（缓存明文缩略图会配回消息并存档）")
 
         # 每日重点发言归档
         digest_cfg = cfg.get("digest") or {}
@@ -622,6 +650,104 @@ class Consumer:
 
         threading.Thread(target=worker, name=f"voice-retry-{msg_id[-6:]}", daemon=True).start()
 
+
+    def _conv_by_hash(self, conv_hash: str) -> str | None:
+        """会话 md5 → 会话 id（反查表 60 秒重建一次，带 labels 兜底）。
+
+        只靠 messages 表的 DISTINCT 会漏掉"还没有消息入库"的会话，所以把
+        labels 里的群/人也并进来。
+        """
+        now = time.time()
+        cache = getattr(self, "_hash2conv", None)
+        if cache is None or now - getattr(self, "_hash2conv_at", 0) > 60:
+            cache = {}
+            try:
+                for (g,) in self.store._conn.execute(
+                        "SELECT DISTINCT group_name FROM messages").fetchall():
+                    if g:
+                        cache[conv_hash(str(g))] = str(g)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                for g in (self.labels.get("groups") or {}):
+                    cache.setdefault(conv_hash(str(g)), str(g))
+                for s in (self.labels.get("senders") or {}):
+                    cache.setdefault(conv_hash(str(s)), str(s))
+            except Exception:  # noqa: BLE001
+                pass
+            self._hash2conv = cache
+            self._hash2conv_at = now
+        return cache.get(conv_hash)
+
+    def _sweeper_pair_loop(self) -> None:
+        """把巡检器抢到的语音文件按时间戳配回 pending 的语音消息并补转写。
+
+        配对依据：`VoiceTemp/<序号>_<秒级时间戳>` 的后缀 = 该语音的时间戳，与库里
+        语音消息的 `received_at` 通常只差几秒。`store.voice_needing_transcript()`
+        只返回"还没转写"的消息（NULL/空/占位符），**不会覆盖已成功的转写**。
+
+        巡检器是**常驻**的，所以哪怕消息事件早就过去了（甚至 app 重启过），
+        只要文件被抢到就能补上 —— 这是对"20 秒窗口"最根本的修补。
+        """
+        while True:
+            try:
+                for chash, ts, path in self.voice_sweeper.pending():
+                    conv_id = self._conv_by_hash(chash)
+                    if not conv_id:
+                        # 反查不到会话（未入库、也不在标定里）→ 丢弃这条，别占着
+                        self.voice_sweeper.take(chash, ts, tol_s=0)
+                        continue
+                    cands = self.store.voice_needing_transcript(conv_id, ts, tol_s=120)
+                    if not cands:
+                        continue          # 可能对应消息还没入库，下一轮再试
+                    got = self.voice_sweeper.take(chash, ts, tol_s=120)
+                    if got is None:
+                        continue
+                    msg_id = cands[0][0]
+                    dest = self.voice_dir / f"{msg_id}{got.suffix or '.bin'}"
+                    try:
+                        shutil.copy2(got, dest)
+                    except OSError as e:
+                        log.warning("巡检配对：复制失败 %s", e)
+                        continue
+                    log.info("巡检配对成功 msg=%s <- %s（时间差值 %ds）",
+                             msg_id, got.name, abs(ts - cands[0][1]))
+                    self._decode_and_transcribe(dest, msg_id)
+            except Exception:  # noqa: BLE001
+                log.debug("巡检配对循环异常", exc_info=True)
+            time.sleep(5)
+
+    def _image_pair_loop(self) -> None:
+        """把抢到的**明文缩略图**按时间戳配回图片消息，存成 `<msg_id>.jpg`。
+
+        配对依据：`Thumb/<序号>_<秒级时间戳>_thumb.jpg` 的后缀时间戳 ↔ 消息 `received_at`
+        （实测差值 9 秒即可对上）。存成 `<msg_id>.jpg` 后，归档/总结可以按消息直接引用图片
+        —— 这是"把卦例截图这类关键图带进总结"的落地方式。
+        """
+        while True:
+            try:
+                for chash, ts, path in self.image_sweeper.pending():
+                    conv_id = self._conv_by_hash(chash)
+                    if not conv_id:
+                        self.image_sweeper.take(chash, ts, tol_s=0)
+                        continue
+                    mid = self.store.message_near(conv_id, ts, msg_type=3, tol_s=90)
+                    if not mid:
+                        continue                      # 图片消息可能还没入库，下一轮再试
+                    got = self.image_sweeper.take(chash, ts, tol_s=90)
+                    if got is None:
+                        continue
+                    dest = self.image_dir / f"{mid}{got.suffix or '.jpg'}"
+                    try:
+                        shutil.copy2(got, dest)
+                    except OSError as e:
+                        log.warning("图片配对：复制失败 %s", e)
+                        continue
+                    log.info("图片已归档 msg=%s <- %s（%d B）", mid, got.name,
+                             dest.stat().st_size)
+            except Exception:  # noqa: BLE001
+                log.debug("图片配对循环异常", exc_info=True)
+            time.sleep(5)
 
     def _compute_priority(self, group_name: str, sender: str) -> tuple[int, str]:
         """返回 (priority, reason)。priority=1 表示命中重点关注。
