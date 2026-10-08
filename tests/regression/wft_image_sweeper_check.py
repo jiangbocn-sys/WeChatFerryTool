@@ -128,6 +128,16 @@ got = sw2.take(GHASH, NOW - 10, tol_s=0)
 check("精确 ts 取到对应图", got is not None and str(NOW - 10) in got.name, str(got))
 check("取走后 pending 减 1", len(sw2.pending()) == 2, str(len(sw2.pending())))
 check("容差外返回 None", sw2.take(GHASH, NOW - 99999, tol_s=5) is None)
+# ⚠️ 遍历 pending() 时**必须**用 take_exact：take(会话, ts) 会返回并移除"同会话里时间最接近的
+#    另一个文件"，导致多个条目抢同一个文件、正文被跳过（图片配对曾因此一张都没归档）
+_pend = sw2.pending()
+if _pend:
+    _want = _pend[0][2]
+    exact = sw2.take_exact(_want)
+    check("take_exact 按确切路径取走", exact is not None and exact == _want, str(exact))
+    check("take_exact 后该条不在 pending",
+          all(p != _want for _h, _t, p in sw2.pending()))
+    check("take_exact 对已取走的路径返回 None", sw2.take_exact(_want) is None)
 check("别的会话返回 None", sw2.take("0" * 32, NOW - 20, tol_s=60) is None)
 
 print("\n[F] Consumer 接线")

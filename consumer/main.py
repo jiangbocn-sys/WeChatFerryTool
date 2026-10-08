@@ -713,12 +713,13 @@ class Consumer:
                     conv_id = self._conv_by_hash(chash)
                     if not conv_id:
                         # 反查不到会话（未入库、也不在标定里）→ 丢弃这条，别占着
-                        self.voice_sweeper.take(chash, ts, tol_s=0)
+                        self.voice_sweeper.take_exact(path)
                         continue
                     cands = self.store.voice_needing_transcript(conv_id, ts, tol_s=120)
                     if not cands:
                         continue          # 可能对应消息还没入库，下一轮再试
-                    got = self.voice_sweeper.take(chash, ts, tol_s=120)
+                    # ⚠️ 必须按**确切路径**取（不能用 take(会话, ts)：它会取走另一个文件）
+                    got = self.voice_sweeper.take_exact(path)
                     if got is None:
                         continue
                     msg_id = cands[0][0]
@@ -747,12 +748,13 @@ class Consumer:
                 for chash, ts, path in self.image_sweeper.pending():
                     conv_id = self._conv_by_hash(chash)
                     if not conv_id:
-                        self.image_sweeper.take(chash, ts, tol_s=0)
+                        self.image_sweeper.take_exact(path)
                         continue
                     mid = self.store.message_near(conv_id, ts, msg_type=3, tol_s=90)
                     if not mid:
                         continue                      # 图片消息可能还没入库，下一轮再试
-                    got = self.image_sweeper.take(chash, ts, tol_s=90)
+                    # ⚠️ 必须按**确切路径**取（不能用 take(会话, ts)：它会取走另一个文件）
+                    got = self.image_sweeper.take_exact(path)
                     if got is None:
                         continue
                     dest = self.image_dir / f"{mid}{got.suffix or '.jpg'}"

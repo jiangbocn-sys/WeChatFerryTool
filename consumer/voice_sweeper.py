@@ -191,3 +191,18 @@ class VoiceSweeper:
         """列出已抢到、还没被取走的语音：[(会话md5, 秒级ts, 路径)]。"""
         with self._lock:
             return [(h, ts, p) for (h, ts), (p, _at) in self._swept.items()]
+
+    def take_exact(self, path: Path) -> Path | None:
+        """按**确切路径**取走某条已抢到的文件。
+
+        配对循环遍历 `pending()` 时**必须**用这个，不要用 `take(会话, ts)` ——
+        后者可能返回并移除同会话里时间最接近的**另一个**文件，
+        导致多个条目抢同一个文件、正文被跳过（在图片配对里踩过这个坑）。
+        """
+        target = Path(path)
+        with self._lock:
+            for k, (p, _at) in list(self._swept.items()):
+                if p == target:
+                    self._swept.pop(k, None)
+                    return p
+        return None

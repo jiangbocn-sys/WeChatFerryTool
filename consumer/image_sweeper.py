@@ -124,7 +124,11 @@ class ImageSweeper:
                         if key in self._seen_src:
                             continue
                         try:
-                            dest = self.out_dir / f"{cdir.name}_{ts}{f.suffix or ext}"
+                            # ⚠️ 微信的临时文件常常**没有扩展名**（如 `<n>_<ts>_hd_temp`、
+                            # `<n>_<ts>_thumb_temp`），它们在内容上仍是 JPEG。
+                            # 若原样保留 `.img` 之类，后续 PIL 会打不开（踩过）→ 统一成 .jpg。
+                            ext_out = f.suffix if f.suffix.lower() in (".jpg", ".jpeg", ".png") else ".jpg"
+                            dest = self.out_dir / f"{cdir.name}_{ts}{ext_out}"
                             shutil.copy2(f, dest)
                         except OSError:
                             self.stats["missed"] += 1
@@ -171,7 +175,12 @@ class ImageSweeper:
             return [(h, ts, p) for (h, ts), (p, _at) in self._saved.items()]
 
     def take(self, conv_hash: str, ts: int, tol_s: int = 0) -> Path | None:
-        """取走一条（精确 ts 或容差内最近的），并从 pending 移除。"""
+        """取走一条（精确 ts 或容差内最近的），并从 pending 移除。
+
+        ⚠️ 遍历 `pending()` 时**不要**用它 —— 它可能返回并移除**另一个**文件
+        （同会话里时间最接近的那个），导致多个条目抢同一个文件、正文被跳过。
+        那种场合用 `take_exact(entry_path)`（踩过：图片配对曾因此一张都没归档）。
+        """
         best: tuple[int, tuple[str, int]] | None = None
         with self._lock:
             for k in list(self._saved):
@@ -185,3 +194,13 @@ class ImageSweeper:
                 return None
             p, _at = self._saved.pop(best[1])
         return p
+
+    def take_exact(self, path: Path) -> Path | None:
+        """按**确切路径**取走某条已抢到的文件（配对循环遍历 `pending()` 时用这个）。"""
+        target = Path(path)
+        with self._lock:
+            for k, (p, _at) in list(self._saved.items()):
+                if p == target:
+                    self._saved.pop(k, None)
+                    return p
+        return None
