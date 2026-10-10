@@ -183,9 +183,19 @@ def parse(msg_type: int | str, content: str) -> dict[str, Any]:
             return out
 
         if mt == 10002:
-            who = strip_tags(re.search(r"<replacemsg>(.*?)</replacemsg>", raw, re.S).group(1)) \
-                if re.search(r"<replacemsg>(.*?)</replacemsg>", raw, re.S) else ""
-            out.update(kind="revoke", who=who, text=who or "撤回了一条消息")
+            m = re.search(r"<replacemsg>(.*?)</replacemsg>", raw, re.S)
+            raw_msg = strip_tags(m.group(1)) if m else ""
+            # 被撤回消息的 id —— 用它回查我们**已经存下来的原文**（2026-10-10）
+            nid = re.search(r"<newmsgid>(\d+)</newmsgid>", raw)
+            # 只取 `"某某" 撤回了一条消息` 里的人名；取不到就留空
+            # （留空很重要：`who` 若是整句，下面渲染会叠成"某某 撤回了一条消息 撤回了一条消息"）
+            who_name = ""
+            mm = re.match(r'"?([^"]+?)"?\s*撤回了一条消息', raw_msg or "")
+            if mm:
+                who_name = mm.group(1).strip()
+            out.update(kind="revoke", who=who_name,
+                       text=raw_msg or "撤回了一条消息",
+                       newmsgid=nid.group(1) if nid else "")
             return out
 
         if mt == 49:
@@ -267,10 +277,13 @@ def _parse_appmsg(raw: str, out: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------- 单行摘要
 
 def summary_line(msg_type: int | str, content: str, *, transcript: str = "",
-                 image_desc: str = "", max_len: int = 160) -> str:
+                 image_desc: str = "", revoked_original: str = "",
+                 max_len: int = 160) -> str:
     """给归档/总结用的**单行**摘要（图片/视频/链接都不再只显示 [类型]）。
 
     `image_desc`：该图片的视觉模型描述（有就写进摘要，让图参与理解）。
+    `revoked_original`：撤回消息对应的**原文**（调用方用 `newmsgid` 回查后传入）——
+    有就渲染成"〔已撤回〕原文：…"，没有则注明"原文未留存"（2026-10-10）。
     """
     d = parse(msg_type, content)
     kind = d.get("kind")
@@ -326,7 +339,27 @@ def summary_line(msg_type: int | str, content: str, *, transcript: str = "",
     elif kind == "call":
         s = f"[通话] {d.get('text') or ''}" + (f" {d['duration']}s" if d.get("duration") else "")
     elif kind == "revoke":
-        s = d.get("text") or "撤回了一条消息"
+        # 保留原文并标注撤回（2026-10-10 用户要求）：
+        # 撤回通知自带 `<newmsgid>`，调用方据此回查我们**已经存下来的原文**传进来。
+        # 拿不到原文时老实说"原文未留存"，不编造、也不只留一句"某某撤回了一条消息"。
+        who = d.get("who") or ""
+        orig = (revoked_original or "").strip().replace("\n", " ")
+        if orig:
+            if len(orig) > 60:
+                orig = orig[:60] + "…"
+            s = f"〔已撤回〕原文：{orig}"
+            if who:
+                s += f"（{who} 撤回）"
+        else:
+            # 拿不到原文（撤回发生在入库之前，或原消息被类型闸门挡掉）→ 老实说明。
+            # `text` 本身就是"某某撤回了一条消息"，所以优先用解出来的 `who`，避免叠字。
+            txt = (d.get("text") or "撤回了一条消息")
+            if who:
+                s = f"〔已撤回〕{who} 撤回了一条消息（原文未留存）"
+            elif "撤回了一条消息" in txt:
+                s = f"〔已撤回〕{txt}（原文未留存）"
+            else:
+                s = f"〔已撤回〕{txt} 撤回了一条消息（原文未留存）"
     elif kind == "unsupported":
         s = f"[{d.get('label')}] {d.get('title') or d.get('text') or ''}".strip()
     else:

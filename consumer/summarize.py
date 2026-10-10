@@ -87,6 +87,11 @@ PROMPT_TEMPLATE = """你是一个群聊内容整理助手。
    太急（可能是太极）、方为（可能是方位）、逢河（可能是逢合）、日成（可能是日辰）、
    暗洞（可能是暗动）。这些词在别的语境里可能完全正确 —— 只有读不通时才考虑。
 8. 不要因为上述推断而编造记录里没有的信息；不推断没把握的词，改与不改都要能自圆其说。
+
+9. **「〔已撤回〕原文：…」表示这条消息已被发送者撤回**：原文是我们**实时留存**下来的，
+   所以内容真实可信，可以照常引用与总结；只是它已不在微信聊天记录里了。
+   需要引用时说明「（已撤回）」。若写的是「原文未留存」，则说明内容确实拿不到，不要猜测。
+   撤回本身往往是有信息的（比如说错话了反悔了），值得点出，但不要过度解读。
 {extra_rules}
 发言记录：
 {body}
@@ -160,12 +165,14 @@ def build_lines(rows: list[sqlite3.Row], labels: dict) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     # 图片理解：一次性取本批图片消息的描述（带缓存；仅在设置页开启时才调模型）
     try:
-        from consumer.digest import image_descriptions
+        from consumer.digest import image_descriptions, revoked_originals
         img_ids = [str(r["msg_id"]) for r in rows
                    if int(r["msg_type"] or 0) == 3 and r["msg_id"]]
         descs = image_descriptions(img_ids) if img_ids else {}
+        # 撤回消息回查原文（保留原文 + 标注撤回）
+        revokes = revoked_originals([r for r in rows if int(r["msg_type"] or 0) == 10002])
     except Exception:  # noqa: BLE001
-        descs = {}
+        descs, revokes = {}, {}
 
     for r in rows:
         if not _in_digest(r, labels, exclude, monitored):
@@ -178,7 +185,8 @@ def build_lines(rows: list[sqlite3.Row], labels: dict) -> dict[str, list[str]]:
         gname = ((labels.get("groups") or {}).get(gkey) or {}).get("name") or gkey
         sname = ((labels.get("senders") or {}).get(skey) or {}).get("name") or skey
 
-        body = _render_content(r, descs.get(str(r["msg_id"]), "")).replace("\n", " ").strip()
+        body = _render_content(r, descs.get(str(r["msg_id"]), ""),
+                               revokes.get(str(r["msg_id"]), "")).replace("\n", " ").strip()
         # 重点人/重点群**不再被过滤**，而是打 ★ 标记交给模型加权（10-07 用户确认）
         star = "★" if _is_star(r, labels) else ""
         out.setdefault(gkey, []).append(
@@ -288,14 +296,15 @@ def collect_group_range(gid: str, start: str, end: str,
 
     lines: list[str] = []
     days: set[str] = set()
-    # 图片理解（阶段总结也一样带图意；带缓存、仅开启时调模型）
+    # 图片理解（阶段总结也一样带图意；带缓存、仅开启时调模型）+ 撤回原文回查
     try:
-        from consumer.digest import image_descriptions
+        from consumer.digest import image_descriptions, revoked_originals
         img_ids = [str(r["msg_id"]) for r in rows
                    if int(r["msg_type"] or 0) == 3 and r["msg_id"]]
         descs = image_descriptions(img_ids) if img_ids else {}
+        revokes = revoked_originals([r for r in rows if int(r["msg_type"] or 0) == 10002])
     except Exception:  # noqa: BLE001
-        descs = {}
+        descs, revokes = {}, {}
     for r in rows:
         if int(r["msg_type"] or 0) in exclude:
             continue
@@ -309,7 +318,8 @@ def collect_group_range(gid: str, start: str, end: str,
         skey = r["sender"] or "?"
         sname = ((labels.get("senders") or {}).get(skey) or {}).get("name") or skey
         star = "★" if _is_star(r, labels) else ""
-        body = _render_content(r, descs.get(str(r["msg_id"]), "")).replace("\n", " ").strip()
+        body = _render_content(r, descs.get(str(r["msg_id"]), ""),
+                               revokes.get(str(r["msg_id"]), "")).replace("\n", " ").strip()
         lines.append(f"[{stamp}]{star}{sname}（{_type_label(int(r['msg_type'] or 0))}）：{body}")
 
     meta = {"count": len(lines), "start": start, "end": end, "days": sorted(days)}

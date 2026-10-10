@@ -109,6 +109,8 @@ def generate_digest(
     img_ids = [str(r["msg_id"]) for r in rows
                if int(r["msg_type"] or 0) == 3 and r["msg_id"]]
     descs = image_descriptions(img_ids) if img_ids else {}
+    # 撤回消息：回查原文，保留原文显示 + 标注撤回（2026-10-10 用户要求）
+    revokes = revoked_originals([r for r in rows if int(r["msg_type"] or 0) == 10002], db_path)
     for gkey, senders in grouped.items():
         gname = _display(labels, "groups", gkey)
         lines.append(f"## {gname}")
@@ -120,7 +122,8 @@ def generate_digest(
             lines.append("")
             for m in msgs:
                 t = datetime.fromtimestamp(m["received_at"]).strftime("%H:%M")
-                content = _render_content(m, descs.get(str(m["msg_id"]), ""))
+                content = _render_content(m, descs.get(str(m["msg_id"]), ""),
+                                          revokes.get(str(m["msg_id"]), ""))
                 lines.append(f"- **{t}** {content}")
             lines.append("")
 
@@ -202,7 +205,60 @@ def _llm_cfg() -> dict:
         return {}
 
 
-def _render_content(m: sqlite3.Row, img_desc: str = "") -> str:
+def revoked_originals(revoke_rows: list, db_file: Path | None = None) -> dict[str, str]:
+    """用撤回通知里的 `newmsgid` 回查**我们已存下来的原文**：{撤回消息的 msg_id: 原文}。
+
+    2026-10-10 用户要求"撤回的信息保留原文显示、标注撤回"。
+    撤回的 XML 自带 `<newmsgid>被撤回消息id</newmsgid>`，而我们**在撤回之前就入库了那条原文**，
+    所以能还原（实测最近 40 条撤回里 **31 条**能回查到原文；查不到的注明"原文未留存"）。
+
+    ⚠️ 只查 `msg_id`（索引/唯一列），一次 `IN (...)` 批量完成，不会因为撤回多而变慢。
+    """
+    from consumer import cards as cards_mod
+    pairs: list[tuple[str, str]] = []      # (撤回消息msg_id, 原文msg_id)
+    for r in revoke_rows:
+        try:
+            d = cards_mod.parse(r["msg_type"], r["content"] or "")
+            nid = str(d.get("newmsgid") or "").strip()
+        except Exception:  # noqa: BLE001
+            nid = ""
+        if nid:
+            pairs.append((str(r["msg_id"]), nid))
+    if not pairs:
+        return {}
+    db_file = db_file or (PROJECT_DIR / "data" / "messages.db")
+    if not db_file.is_file():
+        return {}
+    out: dict[str, str] = {}
+    conn = sqlite3.connect(f"file:{Path(db_file).as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        ids = [p[1] for p in pairs]
+        found: dict[str, str] = {}
+        # 分批避免 SQLite 变量上限（默认 999）
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            q = ("SELECT msg_id, msg_type, content, transcript FROM messages "
+                 f"WHERE msg_id IN ({','.join('?' * len(chunk))})")
+            for row in conn.execute(q, chunk):
+                # 原文自己若是图片/语音，用卡片渲染出"图意/时长"这类可读内容
+                try:
+                    txt = cards_mod.summary_line(
+                        row["msg_type"], row["content"] or "",
+                        transcript=(row["transcript"] or ""))
+                except Exception:  # noqa: BLE001
+                    txt = (row["content"] or "")
+                if txt.strip():
+                    found[str(row["msg_id"])] = txt.strip()
+        for revoke_mid, orig_mid in pairs:
+            if orig_mid in found:
+                out[revoke_mid] = found[orig_mid]
+    finally:
+        conn.close()
+    return out
+
+
+def _render_content(m: sqlite3.Row, img_desc: str = "", revoked_original: str = "") -> str:
     """归档里每条消息的单行摘要。
 
     2026-10-07 起统一走 `consumer/cards.py`：图片/视频/链接/引用/文件不再只显示
@@ -217,6 +273,7 @@ def _render_content(m: sqlite3.Row, img_desc: str = "") -> str:
             m["msg_type"], m["content"] or "",
             transcript=(m["transcript"] or ""),
             image_desc=img_desc,
+            revoked_original=revoked_original,
         )
     except Exception:  # noqa: BLE001
         # 解析器出问题也绝不能影响归档生成

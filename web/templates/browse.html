@@ -169,7 +169,15 @@
             {% elif card and card.kind == 'call' %}
                 <span class="tag">📞 通话</span> {{ card.text }}{% if card.duration %} <span class="muted">{{ card.duration }}s</span>{% endif %}
             {% elif card and card.kind == 'revoke' %}
-                <span class="muted">{{ card.text }}</span>
+                {# 撤回：保留原文显示 + 标注撤回（2026-10-10 用户要求）。
+                   原文来自 digest.revoked_originals() 用 newmsgid 回查。 #}
+                <span class="tag">↩ 已撤回</span>
+                {% if card.revoked_original %}
+                    <span class="muted">原文：</span>{{ card.revoked_original[:300] }}{% if card.revoked_original|length > 300 %}…{% endif %}
+                    {% if card.who %}<span class="muted">（{{ card.who }} 撤回）</span>{% endif %}
+                {% else %}
+                    <span class="muted">{{ card.text }}（原文未留存）</span>
+                {% endif %}
             {% elif card and card.kind == 'unsupported' %}
                 <span class="tag">{{ card.label }}</span>
                 {% if card.title %}{{ card.title }}{% elif card.text %}<span class="muted">{{ card.text }}</span>{% endif %}

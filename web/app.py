@@ -1983,6 +1983,23 @@ def create_app() -> Flask:
                     filtered.append(r)
             rows = filtered
 
+        # 撤回消息：一次性回查原文（保留原文 + 标注撤回，2026-10-10 用户要求）。
+        # 浏览页与归档/总结用的是同一套 `digest.revoked_originals()` + `cards.summary_line`，
+        # 保证三处显示一致。
+        revoke_map: dict[str, str] = {}
+        rev_rows = [r for r in rows if int(r.get("msg_type") or 0) == 10002]
+        if rev_rows:
+            try:
+                from consumer import digest as digest_mod
+                class _R:  # cards.parse 需要下标访问 msg_type/content/msg_id
+                    def __init__(self, d):
+                        self._d = d
+                    def __getitem__(self, k):
+                        return self._d.get(k)
+                revoke_map = digest_mod.revoked_originals([_R(r) for r in rev_rows], DB_PATH)
+            except Exception:  # noqa: BLE001
+                revoke_map = {}
+
         for r in rows:
             g = labels.get("groups", {}).get(r["group_name"], {})
             s = labels.get("senders", {}).get(r["sender"], {})
@@ -1998,6 +2015,9 @@ def create_app() -> Flask:
                 r["card"] = cards_mod.parse(r.get("msg_type") or 0, r.get("content") or "")
                 if (r.get("msg_type") or 0) == 34 and (r.get("transcript") or "").strip():
                     r["card"]["transcript"] = r["transcript"]
+                # 撤回：把原文放进卡片，模板直接显示（不用改模板）
+                if (r.get("msg_type") or 0) == 10002:
+                    r["card"]["revoked_original"] = revoke_map.get(str(r["msg_id"]), "")
             except Exception:  # noqa: BLE001
                 r["card"] = None
             r["preview"] = (r.get("content") or "")[:200]
