@@ -195,6 +195,8 @@ def parse(msg_type: int | str, content: str) -> dict[str, Any]:
                 who_name = mm.group(1).strip()
             out.update(kind="revoke", who=who_name,
                        text=raw_msg or "撤回了一条消息",
+                       # 去掉微信 replacemsg 里的人名引号，避免显示成 `"许贵胜" 撤回了一条消息`
+                       text_clean=_revoke_clean(raw_msg),
                        newmsgid=nid.group(1) if nid else "")
             return out
 
@@ -276,6 +278,19 @@ def _parse_appmsg(raw: str, out: dict[str, Any]) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- 单行摘要
 
+def _revoke_clean(raw_msg: str) -> str:
+    """把撤回通知文案里的引号去掉：`"许贵胜" 撤回了一条消息` → `许贵胜 撤回了一条消息`。
+
+    微信的 `<replacemsg>` 给的是 `"某某" 撤回了一条消息`（带引号），
+    直接显示会变成 `"许贵胜" 撤回了一条消息（原文未留存）`，不好看也不一致。
+    """
+    t = (raw_msg or "").strip()
+    if not t:
+        return "撤回了一条消息"
+    t = re.sub(r'^["“”\']+(.+?)["“”\']+\s*', r"\1 ", t)
+    return t.strip() or "撤回了一条消息"
+
+
 def summary_line(msg_type: int | str, content: str, *, transcript: str = "",
                  image_desc: str = "", revoked_original: str = "",
                  max_len: int = 160) -> str:
@@ -353,7 +368,7 @@ def summary_line(msg_type: int | str, content: str, *, transcript: str = "",
         else:
             # 拿不到原文（撤回发生在入库之前，或原消息被类型闸门挡掉）→ 老实说明。
             # `text` 本身就是"某某撤回了一条消息"，所以优先用解出来的 `who`，避免叠字。
-            txt = (d.get("text") or "撤回了一条消息")
+            txt = (d.get("text_clean") or d.get("text") or "撤回了一条消息")
             if who:
                 s = f"〔已撤回〕{who} 撤回了一条消息（原文未留存）"
             elif "撤回了一条消息" in txt:

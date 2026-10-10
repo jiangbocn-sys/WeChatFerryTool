@@ -176,7 +176,7 @@
                     <span class="muted">原文：</span>{{ card.revoked_original[:300] }}{% if card.revoked_original|length > 300 %}…{% endif %}
                     {% if card.who %}<span class="muted">（{{ card.who }} 撤回）</span>{% endif %}
                 {% else %}
-                    <span class="muted">{{ card.text }}（原文未留存）</span>
+                    <span class="muted">{{ card.text_clean or card.text }}（原文未留存）</span>
                 {% endif %}
             {% elif card and card.kind == 'unsupported' %}
                 <span class="tag">{{ card.label }}</span>

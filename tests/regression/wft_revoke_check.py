@@ -111,6 +111,7 @@ s2 = cards.summary_line(10002, REVOKE_XML)
 check("无原文 → 注明「原文未留存」", "原文未留存" in s2, s2)
 check("无原文仍有撤回人", "许贵胜" in s2, s2)
 check("无原文不含引号噪音", '"' not in s2, s2)
+check("无原文用去引号后的文案", s2 == "〔已撤回〕许贵胜 撤回了一条消息（原文未留存）", s2)
 s3 = cards.summary_line(10002, '<sysmsg type="revokemsg"><revokemsg>'
                               '<replacemsg><![CDATA[撤回了一条消息]]></replacemsg>'
                               '</revokemsg></sysmsg>')
