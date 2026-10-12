@@ -5,13 +5,14 @@
 
 ⚠️ 这是本项目**唯一会主动往群里发言**的功能，所以本套件重点验证"安全闸门"：
   A. 文案清洗 `md_to_plain` 与切分 `chunk_text` / `make_messages`（纯函数，不发送）
-  B. **双重开关**：总闸关 → 一条都不发；每群未勾选 → 该群不发；两者都开才发
+  B. **唯一开关 = 每群勾选**（默认不勾 = 不发；10-12 起**没有全局总闸**）
   C. `combined` 模式（合并稿含多群内容）→ 一条都不发（防止串群）
   D. 私聊（非 @chatroom）不发
   E. 发送失败不抛异常、审计日志有记录、成功条数正确
   F. 审计日志与 SentTracker 记账（避免自己发的消息回流）
   G. 监控规则页有勾选框、保存动作会写 labels.groups.<gid>.send_summary
-  H. 设置页有总闸字段 digest.send_to_group
+  H. 与「自动回复」完全独立（不读 replies.*）
+  I. 设置页那一项**只剩调参、没有 enabled 总闸**
 全部用**假 hook**，绝不真发消息。
 """
 from __future__ import annotations
@@ -102,21 +103,20 @@ check("抬头后有正文", len(msgs) == 2 and "内容一" in msgs[1], str(msgs)
 big = make_messages("2026-10-10", "测试群", "长" * 5000, limit=1000)
 check("长总结会分条并带序号", len(big) >= 6 and "（1/" in big[1], str(len(big)))
 
-print("\n[B] 双重开关（核心安全闸门）")
+print("\n[B] 唯一开关 = 每群勾选（10-12 起没有全局总闸）")
 tracker = FakeTracker()
 
-# B1: 总闸关 → 即使某群勾选了也不发
-hook = FakeHook()
-s_off = SummarySender(hook, SC, {"enabled": False}, tracker=tracker)
-check("总闸关：enabled_globally() 为假", s_off.enabled_globally() is False)
-labels_send = {"groups": {GID: {"send_summary": True}}}
-check("每群勾选为真", SummarySender.enabled_for_group(labels_send, GID) is True)
+check("每群勾选为真", SummarySender.enabled_for_group({"groups": {GID: {"send_summary": True}}},
+                                                     GID) is True)
 check("未勾选的群为假", SummarySender.enabled_for_group({"groups": {GID2: {}}}, GID2) is False)
 check("不在 labels 里的群为假", SummarySender.enabled_for_group({}, GID) is False)
-
-# B2: 总闸开 + 勾选 → 发
+check("**没有 enabled_globally 这个总闸了**",
+      not hasattr(SummarySender, "enabled_globally"))
+# 配置段只放调参：即使传了 enabled 也不该被当成开关
 hook2 = FakeHook()
-s_on = SummarySender(hook2, SC, {"enabled": True, "min_interval_s": 0}, tracker=tracker)
+s_on = SummarySender(hook2, SC, {"dry_run": False, "min_interval_s": 0,
+                                 "enabled": False},   # 故意塞个陈旧字段：不该拦
+                       tracker=tracker)
 n = s_on.send_group(GID, ["第一条", "第二条"])
 check("发送条数正确", n == 2 and len(hook2.sent) == 2, str(hook2.sent))
 check("发给了正确的群", all(to == GID for to, _ in hook2.sent), str(hook2.sent))
@@ -147,7 +147,8 @@ print("\n[E] Consumer 接线：三处安全判断都在")
 import inspect  # noqa: E402
 from consumer.main import Consumer  # noqa: E402
 src = inspect.getsource(Consumer._send_summaries_to_groups)
-check("有总闸判断", "enabled_globally" in src)
+check("**不看任何全局总闸**（用户 10-12 要求删除）",
+      "enabled_globally" not in src and 'gcfg.get("enabled")' not in src)
 check("有每群勾选判断", "enabled_for_group" in src)
 check("combined 模式不发", 'mode != "per_group"' in src or "per_group" in src)
 check("私聊不发（只发 @chatroom）", "@chatroom" in src)
@@ -161,13 +162,14 @@ print("\n[F] 监控规则页：勾选框 + 保存动作")
 appsrc = (PROJ / "web" / "app.py").read_text(encoding="utf-8")
 tpl = (PROJ / "web" / "templates" / "_monitor_block.html").read_text(encoding="utf-8")
 check("模板有「发到群内」勾选框", "发到群内" in tpl and 'name="send_{{ g.id }}"' in tpl)
-check("模板说明了需要总闸", "digest.send_to_group" in tpl)
+check("模板说明了「勾选就是开关、没有别的总开关」",
+      "勾选就是开关" in tpl and "没有别的总开关" in tpl)
+check("模板不再要求设置页总闸", "digest.send_to_group" not in tpl)
 check("模板提示了风控风险", "风控" in tpl)
 check("模板说明 combined 不发", "combined" in tpl)
 check("group_rows 传了 send_summary", '"send_summary": bool(ent.get("send_summary"))' in appsrc)
 check("保存动作处理 send_<群id>", 'f"send_{gkey}"' in appsrc)
 check("取消勾选会删键", 'ent.pop("send_summary", None)' in appsrc)
-check("设置页有总闸字段", '"path": "digest.send_to_group"' in appsrc)
 
 print("\n[G] 真实保存流程（走 flask 测试客户端，不真发消息）")
 import yaml  # noqa: E402
@@ -241,21 +243,25 @@ check("发群逻辑代码里不出现 test_mode/test_only", "test_mode" not in s
 # 关掉自动回复，不影响发群
 hook5 = FakeHook()
 s5 = SummarySender(hook5, SC,
-                   {"enabled": True, "min_interval_s": 0,
-                    # 故意塞进 replies 段：发群完全不该看它
-                    "replies": {"enabled": False, "templates": []}},
+                   # 故意塞进 replies 段：发群完全不该看它
+                   {"min_interval_s": 0, "replies": {"enabled": False, "templates": []}},
                    tracker=FakeTracker())
 n5 = s5.send_group(GID, ["总结正文"])
 check("**自动回复关闭时，总结照样发出**", n5 == 1 and len(hook5.sent) == 1, str(n5))
-# 反过来：发群总闸关闭时，不影响自动回复（用配置读取层面验证，不真发）
-s6 = SummarySender(FakeHook(), SC, {"enabled": False}, tracker=FakeTracker())
-check("发群总闸关闭只是不发总结（不碰回复链路）", s6.enabled_globally() is False)
-# 两个开关是**不同的键**，不会互相覆盖
-digest_keys = {"send_to_group"}
+# 两个功能是**不同的配置键**，不会互相覆盖
+digest_keys = {"send_to_group"}          # 只剩调参段
 replies_keys = {"enabled", "templates", "history_count", "rate_limit"}
 check("两组配置键完全不重叠", not (digest_keys & replies_keys), str(digest_keys & replies_keys))
 check("UI 明确写了『与自动回复相互独立』", "相互独立" in
       (PROJ / "web" / "templates" / "_monitor_block.html").read_text(encoding="utf-8"))
+# 发群的调参段里**不能有 enabled**（用户 10-12 要求删掉那个选项）
+app_txt = (PROJ / "web" / "app.py").read_text(encoding="utf-8")
+seg = app_txt[app_txt.index('"path": "digest.send_to_group"'):]
+seg = seg[:seg.index("}]}")] if "}]}" in seg else seg[:2200]
+check("该设置项文案里不再有 enabled 总闸说法",
+      "总闸" not in seg and '"enabled"' not in seg, seg[:200])
+check("该设置项已改名为『高级参数』", "高级参数" in seg, seg[:80])
+check("该设置项说明了「没有开关」", "这里没有开关" in seg, seg[:120])
 
 print("\n[I] 发群依赖的是「有总结可发」，不是自动回复")
 # digest.summarize=false → 压根不产出总结 → 即使 send_to_group 开着也没东西可发。
@@ -271,4 +277,4 @@ print("=" * 60)
 if FAILS:
     print("FAILED:", FAILS)
     sys.exit(1)
-print("总结发到群（按群勾选 + 总闸 + 安全约束）验证通过")
+print("总结发到群（每群勾选为唯一开关 + 与自动回复独立）验证通过")

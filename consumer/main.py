@@ -404,7 +404,7 @@ class Consumer:
                                              "、".join(r.path.name for r in res.results))
                                     for e in res.errors:
                                         log.warning("部分会话总结失败：%s", e)
-                                    # 把总结发到群里（用户按群勾选；总闸默认关）
+                                    # 把总结发到群里（用户按群勾选；勾选就是唯一开关）
                                     self._send_summaries_to_groups(res, out_dir=self.digest_out_dir)
                         except Exception:  # noqa: BLE001
                             log.exception("自动总结失败（归档文件已正常生成，不影响后续运行）")
@@ -426,8 +426,9 @@ class Consumer:
         LLM 可用）—— 那是"有没有稿子"，与自动回复无关。
 
         安全设计（见 `consumer/group_sender.py` 模块头）：
-          * **双重开关**：每群 `labels.groups.<gid>.send_summary`（默认关）
-            + 全局 `digest.send_to_group`（默认关）—— 两者都为真才发；
+          * **唯一开关 = 每群勾选** `labels.groups.<gid>.send_summary`（默认关）。
+            `digest.send_to_group` 段**只放调参**（dry_run / chunk_chars / min_interval_s），
+            没有总开关 —— 用户 10-12 明确要求删掉那个总闸选项；
           * **只发本群自己的那份**：`summarize_mode=combined`（合并稿含多群内容）时**直接不发**，
             避免把别的群的内容发进来；
           * 失败只记日志，绝不影响归档/抓取。
@@ -435,13 +436,10 @@ class Consumer:
         try:
             from consumer.group_sender import SummarySender, make_messages
             gcfg = (self.cfg.get("digest") or {}).get("send_to_group") or {}
-            if isinstance(gcfg, bool):          # 兼容写成 digest.send_to_group: true
-                gcfg = {"enabled": gcfg}
+            if isinstance(gcfg, bool):          # 兼容老的 `digest.send_to_group: true` 写法
+                gcfg = {}
             sender = SummarySender(self.hook, PROJECT_DIR, gcfg,
                                    tracker=getattr(self, "sent_tracker", None))
-            if not sender.enabled_globally():
-                log.info("总结发群：全局开关关闭（digest.send_to_group.enabled=false），跳过")
-                return
             labels = self._load_labels_for_send()
             mode = str((self.cfg.get("digest") or {}).get("summarize_mode") or "per_group").lower()
             if mode != "per_group":

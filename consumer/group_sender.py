@@ -9,9 +9,11 @@
 
 所以设计上以"保守、可关、可审计"为第一原则：
 
-1. **双重开关**：① 每个群在「监控规则」页勾选"把总结发到群内"（`labels.json` 里
-   `groups.<gid>.send_summary`，默认 **false**）；② 全局总闸 `digest.send_to_group`
-   （config.yaml，默认 **false**）。**两者都为真才会发** —— 想临时全停只改一处。
+1. **唯一开关就是每群勾选**：在「🎯 监控规则」页勾选"把总结发到群内"
+   （`labels.json` 里 `groups.<gid>.send_summary`，默认 **false**）。
+   没有全局总闸 —— 想停某个群就取消它的勾选。
+   （`config.yaml` 的 `digest.send_to_group` 段**只放调参**：`dry_run` / `chunk_chars` /
+   `min_interval_s`；**没有 enabled 这个键**，是否发送完全由每群勾选决定。）
 2. **只发本群自己的总结**：绝不把别的群的内容发进来（`send_summary_mode:
    per_group` 时每群一份文件；`combined` 模式下**不会发**，因为合并稿含其它群内容）。
 3. **长度切分**：微信单条文本框有上限，按 `chunk_chars` 切段发送，段间可加序号。
@@ -133,13 +135,9 @@ class SummarySender:
         self.audit_path = self.data_root / "data" / "summary_sent.jsonl"
 
     # -- 开关 --
-    def enabled_globally(self) -> bool:
-        """全局总闸 `digest.send_to_group`（默认关）。"""
-        return bool(self.cfg.get("enabled", False))
-
     @staticmethod
     def enabled_for_group(labels: dict, gid: str) -> bool:
-        """该群是否勾选了"把总结发到群内"（默认关）。"""
+        """该群是否勾选了"把总结发到群内"（默认关）。**这是唯一的发送开关。**"""
         ent = ((labels or {}).get("groups") or {}).get(gid) or {}
         return bool(ent.get("send_summary", False))
 

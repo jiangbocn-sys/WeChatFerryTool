@@ -65,7 +65,7 @@
             </td>
             <td style="padding:6px; vertical-align:top; text-align:center">
                 {# 每个监控群一个勾选：勾上则每日总结生成后自动发进该群（2026-10-10 需求）。
-                   与「设置 → 每日归档」里的 digest.send_to_group 总闸**同时开启**才会真发。 #}
+                   **这就是唯一的开关** —— 没有全局总闸（用户 10-12 要求删掉）。 #}
                 <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer">
                     <input type="checkbox" name="send_{{ g.id }}" value="1"
                            {% if g.send_summary %}checked{% endif %}>
@@ -94,11 +94,10 @@
             本功能<b>不看</b><code>replies.*</code>（自动回复开关/模板/限速都不是它的条件），
             关掉自动回复也照样发；反过来关掉本功能也不影响自动回复。<br>
             勾选后，每晚总结生成完会把<b>该群自己的那份总结</b>自动发进群（Markdown 会清成纯文本，
-            过长会分条发送）。<br>
-            ⚠️ <b>还需在「⚙️ 设置 → 每日归档」里把总闸 <code>digest.send_to_group</code> 的
-            <code>enabled</code> 设为 true</b>，<b>两处同时开启才会真发</b> —— 想临时全停只改总闸一处即可。<br>
+            过长会分条发送）。<b>勾选就是开关</b>：勾上即发、取消即停，<b>没有别的总开关</b>。<br>
             ⚠️ <b>这是本项目唯一会主动往群里发言的功能</b>，自动发言有被风控的可能：
-            建议先把 <code>dry_run</code> 设为 true 跑一夜（只写日志不真发），确认内容无误再关掉演练。<br>
+            建议先把「设置 → 每日归档 → 总结发群的高级参数」里的 <code>dry_run</code> 设为 true
+            跑一夜（只写日志不真发），确认内容无误再关掉演练。<br>
             ⚠️ 当日总结方式为 <code>combined</code>（所有群合并成一份）时<b>不会发</b>，
             避免把这个群的内容发到别的群。<br>
             ℹ️ 唯一的前置条件是<b>当天确实产出了该群的总结</b>（即 <code>digest.summarize</code> 开着
