@@ -20,7 +20,7 @@ import sqlite3
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -141,6 +141,19 @@ def validate_config(cfg: dict) -> None:
 
 
 # ------- 主循环 --------
+def _norm_hhmm(text: str, default: str = "23:30") -> str:
+    """把用户填的时刻规范化成**补零的 HH:MM**。
+
+    ⚠️ 必须规范化：触发判断是与当前时刻做**字符串比较**（`"09:00" >= "6:00"` 为 False），
+    用户填 `6:00` 时不补零会导致"过了 6 点反而不触发"（2026-10-12 实际踩到）。
+    """
+    try:
+        hh, mm = (int(x) for x in str(text or default).strip().split(":")[:2])
+        return f"{min(max(hh, 0), 23):02d}:{min(max(mm, 0), 59):02d}"
+    except (ValueError, TypeError):
+        return default
+
+
 class Consumer:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -269,7 +282,7 @@ class Consumer:
         # 每日重点发言归档
         digest_cfg = cfg.get("digest") or {}
         self.digest_enabled = bool(digest_cfg.get("enabled", True))
-        self.digest_time = str(digest_cfg.get("time") or "23:30")
+        self.digest_time = _norm_hhmm(str(digest_cfg.get("time") or "23:30"))
         self.digest_out_dir = PROJECT_DIR / (digest_cfg.get("dir") or "reports")
         # 归档后是否顺带让 LLM 总结（默认开；没配 LLM 会自动跳过；digest.summarize: false 可关）
         self.digest_summarize = bool(digest_cfg.get("summarize", True))
@@ -360,6 +373,28 @@ class Consumer:
         log.info("标定已热重载：群 %d→%d，联系人 %d→%d", old_g, new_g, old_s, new_s)
         return True
 
+    def _digest_window_now(self) -> tuple[int, int, str]:
+        """算出"此刻该归档的那个窗口" `(start_ts, end_ts, 日期标签)`。
+
+        2026-10-12 修：归档时间设成 06:00 后，原来生成的是「当天 00:00~06:00」约 6 小时。
+        现在改为**刚刚结束的那个 24 小时窗口**：06:00 跑 → 覆盖「前一天 06:00 ~ 当天 06:00」。
+        算法：先找到"最近一次到点时刻"（今天 `digest.time`，若还没到就用昨天的），
+        窗口 = 该时刻往前 24 小时。这样无论几点触发（到点自动跑、或晚了几小时才补跑），
+        拿到的都是**上一个完整窗口**，且连续两天首尾相接、不重不漏。
+        """
+        end_hhmm = str(self.digest_time or "23:30")
+        hh, mm = 0, 0
+        try:
+            hh, mm = (int(x) for x in end_hhmm.split(":")[:2])
+        except (ValueError, TypeError):
+            hh, mm = 23, 30
+        now = datetime.now()
+        anchor = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if anchor > now:                      # 今天还没到点 → 用昨天的那个时刻
+            anchor = anchor - timedelta(days=1)
+        start = anchor - timedelta(days=1)
+        return int(start.timestamp()), int(anchor.timestamp()), anchor.strftime("%Y-%m-%d")
+
     def _digest_loop(self) -> None:
         """后台线程：每天到点生成重点发言归档（状态持久化，防重启重复生成）。"""
         state_path = PROJECT_DIR / "data" / "digest_state.json"
@@ -373,20 +408,33 @@ class Consumer:
                 now = datetime.now()
                 today = now.strftime("%Y-%m-%d")
                 hhmm = now.strftime("%H:%M")
-                last_date = ""
+                # 先算出"此刻该归档的那个窗口"（06:00 跑 → 前一天 06:00 ~ 当天 06:00）
+                w_start, w_end, w_label = self._digest_window_now()
+                # ⚠️ 状态按**窗口**记账，而不是只记"今天跑过没有"。
+                # 原因：改了归档时刻（例如 23:30 → 06:00）后，同一个日期对应的窗口变了，
+                # 若只比 last_date，当天就不会再生成 → 用户改了时间却看不到新口径的归档（踩过）。
+                last_key = ""
                 if state_path.exists():
                     try:
-                        last_date = json.loads(state_path.read_text(encoding="utf-8")).get("last_date", "")
+                        st = json.loads(state_path.read_text(encoding="utf-8"))
+                        last_key = str(st.get("window_key") or st.get("last_date") or "")
                     except Exception:  # noqa: BLE001
                         pass
-                if hhmm >= self.digest_time and last_date != today:
+                window_key = f"{w_start}-{w_end}"
+                if hhmm >= self.digest_time and last_key != window_key:
                     from consumer.digest import generate_digest
-                    p = generate_digest(today, out_dir=self.digest_out_dir)
+                    p = generate_digest(w_label, out_dir=self.digest_out_dir,
+                                        start_ts=w_start, end_ts=w_end)
                     state_path.write_text(
-                        json.dumps({"last_date": today, "last_file": str(p)}, ensure_ascii=False),
+                        json.dumps({"last_date": today, "last_file": str(p),
+                                    "window": [w_start, w_end], "window_label": w_label,
+                                    "window_key": window_key},
+                                   ensure_ascii=False),
                         encoding="utf-8",
                     )
-                    log.info("每日归档已生成: %s", p)
+                    log.info("每日归档已生成: %s（覆盖 %s ~ %s）", p,
+                             datetime.fromtimestamp(w_start).strftime("%m-%d %H:%M"),
+                             datetime.fromtimestamp(w_end).strftime("%m-%d %H:%M"))
                     # 归档之后顺带让 LLM 总结（可用 digest.summarize=false 关掉）。
                     # 单独 try：总结失败绝不能影响归档与状态文件。
                     if self.digest_summarize:
@@ -395,7 +443,9 @@ class Consumer:
                             if not summarize_mod.llm_ready():
                                 log.info("已跳过自动总结：未配置 LLM（base_url / model 为空）")
                             else:
-                                res = summarize_mod.summarize(today, out_dir=self.digest_out_dir)
+                                # ⚠️ 用**窗口标签**而不是 today：归档覆盖的是"前一天到当天"，
+                                # 总结必须与归档同一口径（`summarize.collect` 也走窗口）。
+                                res = summarize_mod.summarize(w_label, out_dir=self.digest_out_dir)
                                 if res is None:
                                     log.info("已跳过自动总结：当天没有进入归档的消息")
                                 else:

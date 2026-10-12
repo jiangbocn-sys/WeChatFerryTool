@@ -606,10 +606,13 @@ def collect(date_str: str, db_path: Path | None = None) -> tuple[dict[str, list[
 
     数据库不存在返回 None（Web 端据此提示"先让 consumer 跑起来"）。
     纯本地、不联网，Web 的「预览 prompt」用的就是这个。
+
+    ⚠️ 窗口必须与 `digest.generate_digest` **完全一致**（都走 `digest._digest_window_for`）：
+    原来这里写死按自然日，而归档改成"按归档时刻划窗口"后，两者会错位——
+    归档里有、总结看不到（或反之）。2026-10-12 一起统一。
     """
-    day = datetime.strptime(date_str, "%Y-%m-%d")
-    start_ts = int(day.timestamp())
-    end_ts = int((day + timedelta(days=1)).timestamp())
+    from consumer.digest import _digest_window_for     # 局部 import 避免循环依赖
+    start_ts, end_ts = _digest_window_for(date_str)
 
     db_file = db_path or (PROJECT_DIR / "data" / "messages.db")
     if not db_file.is_file():

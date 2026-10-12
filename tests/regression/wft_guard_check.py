@@ -1,4 +1,4 @@
-﻿"""验证：修复后的配置页不会再因"误提交"清空配置，且真实配置已恢复完整。
+"""验证：修复后的配置页不会再因"误提交"清空配置，且真实配置已恢复完整。
 
 checks:
  1. /config/save 收到缺少总设置字段的提交（模拟 form 嵌套/其它按钮误提交）→ 拒绝且**不写盘**
@@ -110,8 +110,11 @@ check("llm.model 已恢复", bool(real["llm"]["model"]), str(real["llm"].get("mo
 check("llm.api_key 在", bool(real["llm"]["api_key"]))
 check("hook.api_base 已恢复", real["hook"]["api_base"] == "http://127.0.0.1:30001")
 check("storage.sqlite_path 已恢复", real["storage"]["sqlite_path"] == "data/messages.db")
-check("digest 已恢复（23:30 + 自动总结）",
-      real["digest"]["time"] == "23:30" and real["digest"]["summarize"] is True, str(real["digest"]))
+# ⚠️ 不要硬编码具体时刻：用户会把 digest.time 改成 6:00（2026-10-12 实际改过），
+#    硬编码 23:30 会让这套件莫名挂掉（踩到）。只校验"归档配置完整存在且被恢复"。
+check("digest 已恢复（有 time 且自动总结开着）",
+      bool(str(real["digest"].get("time") or "").strip())
+      and real["digest"]["summarize"] is True, str(real["digest"]))
 check("voice/asr 已恢复", real["voice"]["enabled"] is True and real["asr"]["enabled"] is True)
 check("replies 段结构完好（模板由用户在页面上增删，数量不做断言）",
       isinstance(real["replies"].get("templates"), list) and bool(real["replies"]["enabled"]) is not None,

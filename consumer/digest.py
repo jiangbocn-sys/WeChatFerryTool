@@ -48,21 +48,79 @@ def _display(labels: dict, kind: str, key: str) -> str:
     return name or key
 
 
+def digest_window(date_str: str, end_hhmm: str = "23:30") -> tuple[int, int]:
+    """把一个"日期标签"换算成归档的**时间窗口** `(start_ts, end_ts)`。
+
+    **约定：标签 = 窗口「结束」那一天的日期**，`end_hhmm` 就是 `digest.time`。
+    所以 `digest_window("2026-10-13", "06:00")` = `[10-12 06:00, 10-13 06:00)`
+    —— 即 `digest-2026-10-13.md` 装的是"10-12 早上 6 点到 10-13 早上 6 点"这一整天。
+
+    2026-10-12 用户发现的问题：原来窗口**永远按自然日**（`D 00:00 ~ D+1 00:00`），
+    而触发条件是"当天到了 `digest.time` 就跑"。于是把归档时间改成 **06:00** 后，
+    生成的那份只涵盖「当天 00:00~06:00」**约 6 小时**；用户要的是"前一天 6 点到今天 6 点"。
+    ⚠️ 修的时候还踩过一次：把标签当成"窗口起始日"，于是 06:00 触发时算出来的窗口
+    **起点比当前时刻还晚**（拿到了"未来的窗口"）。所以这里固定为"**结束日**"语义。
+
+    * `end_hhmm == "00:00"` → 窗口 `[D-1 00:00, D 00:00)`，即"标签 D 装的是 D-1 那一自然日"
+      （这是"结束日"语义在零点时的自然结果）；
+    * 其它时刻（如 `06:00`）→ `[D-1 06:00, D 06:00)`。
+
+    这样**依然不重不漏**：`[D-1 06:00, D 06:00)` 与 `[D 06:00, D+1 06:00)`
+    首尾相接，既不重叠也不留空档。
+    """
+    end_day = datetime.strptime(date_str, "%Y-%m-%d")
+    start = end_day - timedelta(days=1)
+    try:
+        hh, mm = (int(x) for x in str(end_hhmm or "00:00").split(":")[:2])
+        hh, mm = min(max(hh, 0), 23), min(max(mm, 0), 59)
+    except (ValueError, TypeError):
+        hh, mm = 0, 0
+    start = start.replace(hour=hh, minute=mm)
+    # 结束时刻 = 标签日的那一时刻（`06:00` → 标签日 06:00；`00:00` → 标签日 00:00）
+    end = end_day.replace(hour=hh, minute=mm)
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def _digest_window_for(date_str: str) -> tuple[int, int]:
+    """读配置决定窗口：`digest.window_end_at_time`（默认 true）关掉则退回自然日。
+
+    留这个开关是为了**兼容旧行为**：若你更想要"按自然日、跨零点"的归档，
+    就把它设成 false（那么 06:00 跑出来的那份仍只含当天凌晨那几小时）。
+    """
+    try:
+        import yaml
+        import paths
+        cfg = yaml.safe_load(paths.config_path().read_text(encoding="utf-8")) or {}
+        d = cfg.get("digest") or {}
+        if not bool(d.get("window_end_at_time", True)):
+            return digest_window(date_str, "00:00")
+        end_hhmm = str(d.get("time") or "23:30")
+    except Exception:  # noqa: BLE001
+        end_hhmm = "23:30"
+    return digest_window(date_str, end_hhmm)
+
+
 def generate_digest(
     date_str: str,
     db_path: Path | None = None,
     labels_path: Path | None = None,
     out_dir: Path | None = None,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
 ) -> Path:
-    """生成指定日期的归档 Markdown，返回文件路径。"""
+    """生成指定日期的归档 Markdown，返回文件路径。
+
+    `start_ts` / `end_ts` 不传时按**归档时刻**划窗口（见 `digest_window`）：
+    设成 06:00 时这份覆盖「前一天 06:00 ~ 当天 06:00」，而不是"当天凌晨那几小时"。
+    """
     db_path = db_path or (PROJECT_DIR / "data" / "messages.db")
     labels_path = labels_path or (PROJECT_DIR / "data" / "labels.json")
     out_dir = out_dir or (PROJECT_DIR / "reports")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    day = datetime.strptime(date_str, "%Y-%m-%d")
-    start_ts = int(day.timestamp())
-    end_ts = int((day + timedelta(days=1)).timestamp())
+    if start_ts is None or end_ts is None:
+        start_ts, end_ts = _digest_window_for(date_str)
+    start_ts, end_ts = int(start_ts), int(end_ts)
 
     labels = _load_labels(labels_path)
 
