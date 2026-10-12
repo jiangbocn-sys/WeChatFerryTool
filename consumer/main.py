@@ -419,6 +419,12 @@ class Consumer:
     def _send_summaries_to_groups(self, res, out_dir=None) -> None:
         """把每群总结发给**勾选了"发到群内"的群**（2026-10-10 需求）。
 
+        ⚠️ **与自动回复完全独立**（用户明确要求"不同功能线，不要互相限制"）：
+        本方法**不读** `replies.*`（自动回复开关/模板/限速都不是它的条件），也不引用
+        `self.replier`；关掉自动回复照样发，反过来关掉本功能也不影响自动回复。
+        唯一前置条件是"当天确实产出了该群的总结"（即 `digest.summarize` 开着且有内容、
+        LLM 可用）—— 那是"有没有稿子"，与自动回复无关。
+
         安全设计（见 `consumer/group_sender.py` 模块头）：
           * **双重开关**：每群 `labels.groups.<gid>.send_summary`（默认关）
             + 全局 `digest.send_to_group`（默认关）—— 两者都为真才发；

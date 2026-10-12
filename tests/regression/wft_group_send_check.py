@@ -204,6 +204,68 @@ try:
 except Exception as e:  # noqa: BLE001
     check(f"flask 测试客户端可用（{type(e).__name__}: {e}）", False)
 
+print("\n[H] **与自动回复完全独立**（用户明确要求：不同功能线，不要互相限制）")
+# 自动回复（replies.*）与"总结发群"（digest.send_to_group）是两条**独立**链路：
+# 各自开关、各自范围；只共用底层 hook.send_text 客户端，不共用任何业务开关或状态。
+#
+# ⚠️ 断言必须只看**可执行代码**：模块/方法的**文档与注释里会提到** replies/replier
+#    （正是在说明"本功能不读它"），用字符串包含判断会误报（踩过）。
+import ast as _ast  # noqa: E402
+
+
+def code_only(fn_or_src) -> str:
+    """取源码里**去掉所有注释与文档字符串**后的可执行部分。
+
+    ⚠️ 方法的 `getsource` 带 4 空格缩进，直接 `ast.parse` 会 `IndentationError` →
+    必须先 `textwrap.dedent`（踩过）。
+    """
+    import textwrap
+    src = fn_or_src if isinstance(fn_or_src, str) else inspect.getsource(fn_or_src)
+    tree = _ast.parse(textwrap.dedent(src))
+    for node in _ast.walk(tree):
+        # 清掉所有字符串常量（文档字符串 + 普通常量），只留标识符与结构
+        if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+            node.value = ""
+    return _ast.unparse(tree)
+
+
+gs_code = code_only(__import__("consumer.group_sender", fromlist=["x"]))
+check("发群模块代码里不出现 replies", "replies" not in gs_code, gs_code[:0])
+check("发群模块代码里不出现 replier", "replier" not in gs_code)
+check("发群模块代码里不出现 ReplyTemplate", "ReplyTemplate" not in gs_code)
+send_code = code_only(Consumer._send_summaries_to_groups)
+check("发群逻辑代码里不读 replies 段", "replies" not in send_code)
+check("发群逻辑代码里不引用 replier 对象", "replier" not in send_code)
+check("发群逻辑代码里不出现 test_mode/test_only", "test_mode" not in send_code
+      and "test_only" not in send_code)
+# 关掉自动回复，不影响发群
+hook5 = FakeHook()
+s5 = SummarySender(hook5, SC,
+                   {"enabled": True, "min_interval_s": 0,
+                    # 故意塞进 replies 段：发群完全不该看它
+                    "replies": {"enabled": False, "templates": []}},
+                   tracker=FakeTracker())
+n5 = s5.send_group(GID, ["总结正文"])
+check("**自动回复关闭时，总结照样发出**", n5 == 1 and len(hook5.sent) == 1, str(n5))
+# 反过来：发群总闸关闭时，不影响自动回复（用配置读取层面验证，不真发）
+s6 = SummarySender(FakeHook(), SC, {"enabled": False}, tracker=FakeTracker())
+check("发群总闸关闭只是不发总结（不碰回复链路）", s6.enabled_globally() is False)
+# 两个开关是**不同的键**，不会互相覆盖
+digest_keys = {"send_to_group"}
+replies_keys = {"enabled", "templates", "history_count", "rate_limit"}
+check("两组配置键完全不重叠", not (digest_keys & replies_keys), str(digest_keys & replies_keys))
+check("UI 明确写了『与自动回复相互独立』", "相互独立" in
+      (PROJ / "web" / "templates" / "_monitor_block.html").read_text(encoding="utf-8"))
+
+print("\n[I] 发群依赖的是「有总结可发」，不是自动回复")
+# digest.summarize=false → 压根不产出总结 → 即使 send_to_group 开着也没东西可发。
+# 这是"功能线上的依赖"（没有稿子），不是"被自动回复开关限制"。
+loop_src = inspect.getsource(Consumer._digest_loop)
+check("发群调用在总结成功之后", loop_src.index("summarize_mod.summarize") <
+      loop_src.index("_send_summaries_to_groups"))
+check("digest.summarize 关掉时不会走到发群",
+      "if self.digest_summarize:" in loop_src)
+
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)
 if FAILS:
