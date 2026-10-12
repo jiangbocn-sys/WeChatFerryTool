@@ -28,6 +28,7 @@
             <th style="padding:4px 6px">归档范围</th>
             <th style="padding:4px 6px">重点关注的人</th>
             <th style="padding:4px 6px; min-width:260px">🧠 总结提示（提交给大模型）</th>
+            <th style="padding:4px 6px">📤 总结发到群内</th>
         </tr>
         {% for g in group_rows %}
         <tr style="border-top:1px solid #e8f0eb">
@@ -62,17 +63,44 @@
                 <textarea name="hint_{{ g.id }}" rows="3" style="width:100%; font-size:12px"
                           placeholder="例：本群是风水教学群，保留课程要点/卦例分析/作业答疑，剔除寒暄、表情与无关闲聊">{{ g.hint }}</textarea>
             </td>
+            <td style="padding:6px; vertical-align:top; text-align:center">
+                {# 每个监控群一个勾选：勾上则每日总结生成后自动发进该群（2026-10-10 需求）。
+                   与「设置 → 每日归档」里的 digest.send_to_group 总闸**同时开启**才会真发。 #}
+                <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer">
+                    <input type="checkbox" name="send_{{ g.id }}" value="1"
+                           {% if g.send_summary %}checked{% endif %}>
+                    <span style="font-size:12px">发到群内</span>
+                </label>
+                {% if g.send_summary %}
+                <div class="hint" style="margin:2px 0 0; color:#c0392b">已开启</div>
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
     </table>
     <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-        <button type="submit">💾 保存总结提示</button>
+        <button type="submit">💾 保存总结提示与发群勾选</button>
         <span class="hint" style="margin:0">
             保存后立刻生效（标定是热重载的）；想先看效果可去
             <a href="{{ url_for('digest_page') }}">📝 归档/总结</a> 点"预览 prompt"（不花钱）。
         </span>
     </div>
     </form>
+
+    <div class="card" style="background:#fff8f0; border-left:4px solid #e67e22; margin-top:10px">
+        <b style="font-size:13px">📤 关于「总结发到群内」</b>
+        <p class="hint" style="margin:6px 0 0">
+            勾选后，每晚总结生成完会把<b>该群自己的那份总结</b>自动发进群（Markdown 会清成纯文本，
+            过长会分条发送）。<br>
+            ⚠️ <b>还需在「⚙️ 设置 → 每日归档」里把总闸 <code>digest.send_to_group</code> 的
+            <code>enabled</code> 设为 true</b>，<b>两处同时开启才会真发</b> —— 想临时全停只改总闸一处即可。<br>
+            ⚠️ <b>这是本项目唯一会主动往群里发言的功能</b>，自动发言有被风控的可能：
+            建议先把 <code>dry_run</code> 设为 true 跑一夜（只写日志不真发），确认内容无误再关掉演练。<br>
+            ⚠️ 当日总结方式为 <code>combined</code>（所有群合并成一份）时<b>不会发</b>，
+            避免把这个群的内容发到别的群。<br>
+            发送记录：<code>data/summary_sent.jsonl</code>（审计日志）。
+        </p>
+    </div>
 
     {# 每群的操作按钮（移除重点人 / 移出监控名单）：这些必须是独立表单，放表格外面 #}
     <div style="margin-top:10px">

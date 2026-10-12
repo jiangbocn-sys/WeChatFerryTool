@@ -317,6 +317,9 @@ def _config_context() -> dict:
             "focus": [{"id": m, "name": disp("senders", m)} for m in focus],
             # 每群"总结提示"：跟着当日总结一起提交给 LLM（存在 labels.groups.<gid>.summary_hint）
             "hint": str(ent.get("summary_hint") or ""),
+            # 是否把每日总结发进该群（labels.groups.<gid>.send_summary，默认关；
+            # 还需 digest.send_to_group.enabled 总闸同时开启才会真发）
+            "send_summary": bool(ent.get("send_summary")),
         })
     sender_rows = [{"id": s, "name": disp("senders", s)} for s in mon_senders]
 
@@ -697,6 +700,17 @@ def create_app() -> Flask:
                         "只出现一行 `[图片 214×480]` 占位、既没信息又占篇幅",
               "suggest": "建议 3 图片 / 47 表情 / 51 系统 / 10000 系统；"
                          "链接(49)/引用(57) 是**带文字的卡片**，建议保留"},
+             {"path": "digest.send_to_group", "label": "把每日总结发到群（总闸，需与每群勾选同时开启）",
+              "kind": "json",
+              "impact": "**这是唯一会主动往群里发言的归档相关功能**。开启后，每晚总结生成完，"
+                        "会发给**在「🎯 监控规则」页勾选了「把总结发到群内」的群**。\n"
+                        "字段：`enabled`（总闸，默认 false）、`dry_run`（演练：只记日志不真发）、"
+                        "`chunk_chars`（单条上限字数，默认 1800）、`min_interval_s`（发送间隔秒，默认 1.5）。\n"
+                        "⚠️ 安全约束：① **必须总闸与每群勾选同时为真**；② `summarize_mode=combined`"
+                        "（合并成一份，含多个群内容）时**不会发**，只发每群一份的稿子；"
+                        "③ 每发一条都记 `data/summary_sent.jsonl` 审计日志。\n"
+                        "⚠️ 风险：自动发言有被风控的可能，建议先 `dry_run: true` 观察一夜",
+              "suggest": '想启用就填：{"enabled": true, "dry_run": true, "chunk_chars": 1800, "min_interval_s": 2}'},
          ]},
         {"key": "voice", "title": "语音捕获", "fields": [
              {"path": "voice.enabled", "label": "启用语音捕获", "kind": "bool",
@@ -1126,21 +1140,28 @@ def create_app() -> Flask:
             if sid in (labels.get("senders") or {}):
                 labels["senders"][sid]["monitored"] = False
         elif action == "save_hints":
-            # 每群总结提示：字段名 hint_<群id>，一次提交所有监控群的提示。
-            # ⚠️ 只处理**监控名单里**的群，避免页面之外的字段被顺手写进来。
+            # 每群总结提示 + "是否把总结发到群内"（字段名 hint_<群id> / send_<群id>），
+            # 一次提交所有监控群。⚠️ 只处理**监控名单里**的群，避免页面之外的字段被写进来。
             saved_n = 0
             for gkey in _lst("groups"):
                 field = f"hint_{gkey}"
-                if field not in request.form:
+                if field not in request.form and f"send_{gkey}" not in request.form:
                     continue
-                raw = request.form.get(field) or ""
-                hint = raw.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
                 ent = lab_groups.setdefault(gkey, {})
                 ent.setdefault("name", gkey)
-                if hint.strip():
-                    ent["summary_hint"] = hint
+                if field in request.form:
+                    raw = request.form.get(field) or ""
+                    hint = raw.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+                    if hint.strip():
+                        ent["summary_hint"] = hint
+                    else:
+                        ent.pop("summary_hint", None)   # 清空 = 删掉该键，不留空串
+                # 勾选 = 把总结发到该群（默认关）
+                send_on = bool(request.form.get(f"send_{gkey}"))
+                if send_on:
+                    ent["send_summary"] = True
                 else:
-                    ent.pop("summary_hint", None)   # 清空 = 删掉该键，不留空串
+                    ent.pop("send_summary", None)       # 取消勾选 = 删键，保持一致
                 saved_n += 1
             if not saved_n:
                 err = "没有可保存的群（监控名单为空？）"

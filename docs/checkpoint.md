@@ -157,6 +157,31 @@
   以及**排查方法论**（snapshot diff / 控制变量 / 输出写文件 / 别过早下定论）
   整理成可直接复用的笔记。**后续要做图片或语音，先读这一篇，别重新踩一遍。**
 
+* **把每日总结发到群（10-10 需求）**：用户在「🎯 监控规则」页**按群勾选**「把总结发到群内」，
+  勾选后每日总结生成完自动发进该群。因为**这是本项目唯一会主动往群里发言的功能**，
+  实现以"保守、可关、可审计"为第一原则：
+  * **双重开关**：每群 `labels.groups.<gid>.send_summary`（默认关，勾选框写入）
+    **且** 全局 `digest.send_to_group.enabled`（config.yaml，默认关）—— 两者都为真才发；
+    想临时全停只改总闸一处。
+  * **只发本群自己的那份**：`summarize_mode=combined`（合并稿含多群内容）时**一条都不发**；
+    只发 `@chatroom`（私聊不发）。
+  * `consumer/group_sender.py`（新）：`md_to_plain()`（Markdown→微信纯文本，
+    去 `#/**/·/代码围栏/表格分隔行`，不动正文数字与中文）、`chunk_text()`（超长在空行/换行/句末
+    优先切）、`make_messages()`（首条带"【日期 群聊总结】群名（自动汇总，仅供参考）"抬头，
+    多条时带 `（i/n）`）、`SummarySender`（`enabled_globally` / `enabled_for_group` /
+    `send_group`，含 `min_interval_s` 限速、`dry_run` 演练、写 `data/summary_sent.jsonl` 审计、
+    并调 `SentTracker.record()` 防止自己发的消息回流成新消息）。
+  * 接线：`Consumer._send_summaries_to_groups()` 在归档循环里**总结成功后**调用，
+    独立 try（发群失败绝不影响归档/总结/抓取）。
+  * UI：`_monitor_block.html` 新增「📤 总结发到群内」列（勾选框）+ 一段显式风险提示
+    （需总闸、有风控风险、建议先 dry_run、combined 不发、审计日志路径）；
+    `group_rows` 带 `send_summary`；`save_hints` 动作同时处理 `hint_<gid>` 与 `send_<gid>`
+    （取消勾选 = 删键）。
+  * 设置页新增总闸字段 `digest.send_to_group`（json）。
+  回归：`wft_group_send_check`（清洗/切分纯函数、**双重开关**、失败不抛且审计、
+  SentTracker 记账、Consumer 三处安全判断、模板与保存动作、**走 flask 测试客户端的真实保存流程**）；
+  **全部用假 hook，绝不真发消息**。
+
 * **撤回消息：保留原文 + 标注撤回（10-10 用户要求）**：
   用户反馈"撤回的信息原文显示怎么没有了"。**事实核查：原文其实一直在库里** ——
   我们在撤回**之前**就入库了那条消息；撤回通知的 XML 自带

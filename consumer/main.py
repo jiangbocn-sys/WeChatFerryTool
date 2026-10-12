@@ -404,6 +404,8 @@ class Consumer:
                                              "、".join(r.path.name for r in res.results))
                                     for e in res.errors:
                                         log.warning("部分会话总结失败：%s", e)
+                                    # 把总结发到群里（用户按群勾选；总闸默认关）
+                                    self._send_summaries_to_groups(res, out_dir=self.digest_out_dir)
                         except Exception:  # noqa: BLE001
                             log.exception("自动总结失败（归档文件已正常生成，不影响后续运行）")
             except Exception:  # noqa: BLE001
@@ -413,6 +415,65 @@ class Consumer:
                 if self._stop:
                     return
                 time.sleep(1)
+
+    def _send_summaries_to_groups(self, res, out_dir=None) -> None:
+        """把每群总结发给**勾选了"发到群内"的群**（2026-10-10 需求）。
+
+        安全设计（见 `consumer/group_sender.py` 模块头）：
+          * **双重开关**：每群 `labels.groups.<gid>.send_summary`（默认关）
+            + 全局 `digest.send_to_group`（默认关）—— 两者都为真才发；
+          * **只发本群自己的那份**：`summarize_mode=combined`（合并稿含多群内容）时**直接不发**，
+            避免把别的群的内容发进来；
+          * 失败只记日志，绝不影响归档/抓取。
+        """
+        try:
+            from consumer.group_sender import SummarySender, make_messages
+            gcfg = (self.cfg.get("digest") or {}).get("send_to_group") or {}
+            if isinstance(gcfg, bool):          # 兼容写成 digest.send_to_group: true
+                gcfg = {"enabled": gcfg}
+            sender = SummarySender(self.hook, PROJECT_DIR, gcfg,
+                                   tracker=getattr(self, "sent_tracker", None))
+            if not sender.enabled_globally():
+                log.info("总结发群：全局开关关闭（digest.send_to_group.enabled=false），跳过")
+                return
+            labels = self._load_labels_for_send()
+            mode = str((self.cfg.get("digest") or {}).get("summarize_mode") or "per_group").lower()
+            if mode != "per_group":
+                log.info("总结发群：summarize_mode=%s 是合并稿（含多个群的内容），为安全起见不发",
+                         mode)
+                return
+            sent_groups = 0
+            for r in (getattr(res, "results", None) or []):
+                gids = list((r.grouped or {}).keys())
+                if len(gids) != 1:
+                    continue
+                gid = gids[0]
+                if not sender.enabled_for_group(labels, gid):
+                    continue
+                if not gid.endswith("@chatroom"):
+                    log.info("总结发群：%s 不是群（私聊），跳过", gid)
+                    continue
+                msgs = make_messages(
+                    r.date, r.group or gid, r.content,
+                    limit=int(gcfg.get("chunk_chars", 1800)))
+                if not msgs:
+                    continue
+                dry = bool(gcfg.get("dry_run", False))
+                n = sender.send_group(gid, msgs, dry_run=dry)
+                log.info("总结%s到群 %s：%d/%d 条", "演练" if dry else "已发", gid, n, len(msgs))
+                sent_groups += 1
+            if not sent_groups:
+                log.info("总结发群：没有群勾选（或没有可发的总结）")
+        except Exception:  # noqa: BLE001
+            log.exception("总结发群失败（归档与总结已正常生成，不受影响）")
+
+    def _load_labels_for_send(self) -> dict:
+        """读 labels.json（发群前看每个群的勾选状态）。读不到就返回空 → 谁都不发。"""
+        try:
+            p = PROJECT_DIR / "data" / "labels.json"
+            return json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _cleanup_loop(self) -> None:
         """后台线程：到点清理超过保留天数的消息（R-001）。
