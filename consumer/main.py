@@ -457,8 +457,26 @@ class Consumer:
                 if not gid.endswith("@chatroom"):
                     log.info("总结发群：%s 不是群（私聊），跳过", gid)
                     continue
+                # 发群前**二次提炼**：归档稿是给自己看的（贴近聊天内容），
+                # 发进群的应该是不含聊天记录的成品（2026-10-12 用户要求）。
+                # 提炼失败就回退用原稿（宁可详细，也不要漏发）。
+                body = r.content
+                if bool(gcfg.get("refine", True)):
+                    try:
+                        from consumer.group_summary import refine_for_group
+                        from consumer.summarize import _llm_cfg as _sum_llm_cfg
+                        refined = refine_for_group(body, _sum_llm_cfg(),
+                                                   date_str=r.date, group_name=r.group or gid)
+                        if refined:
+                            body = refined
+                            log.info("总结发群：已提炼为群内成品稿（%d 字 → %d 字）",
+                                     len(r.content or ""), len(refined))
+                        else:
+                            log.warning("总结发群：提炼未成功，改用归档原稿发送（内容会更贴近聊天记录）")
+                    except Exception:  # noqa: BLE001
+                        log.exception("总结发群：提炼异常，改用归档原稿发送")
                 msgs = make_messages(
-                    r.date, r.group or gid, r.content,
+                    r.date, r.group or gid, body,
                     limit=int(gcfg.get("chunk_chars", 1800)))
                 if not msgs:
                     continue

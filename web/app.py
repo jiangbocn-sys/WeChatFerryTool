@@ -705,15 +705,18 @@ def create_app() -> Flask:
               "impact": "⚠️ **这里没有开关**：是否把总结发到群，完全由「🎯 监控规则」页"
                         "每个群自己的「📤 总结发到群内」勾选决定（默认全部不勾 = 不发）。\n"
                         "本项**只放调参**：`dry_run`（演练：只写日志、不真发，建议先跑一夜）、"
+                        "`refine`（发群前用 LLM **二次提炼**成不含聊天记录的成品稿，**默认 true**）、"
                         "`chunk_chars`（单条上限字数，默认 1800）、"
                         "`min_interval_s`（多条之间的发送间隔秒，默认 1.5，降低风控概率）。\n"
                         "留空/删掉本项也能正常工作（用上面的默认值）。\n"
+                        "ℹ️ 归档文件（`reports/summary-*.md`）仍是**给用户自己看的详细稿**；"
+                        "只有**发进群的那份**会被二次提炼。\n"
                         "⚠️ 这个功能与「自动回复」**相互独立**：它不看 `replies.*`，关掉自动回复也照样发。\n"
                         "⚠️ 唯一会主动往群里发言的功能，自动发言有被风控的可能；"
                         "当日总结方式为 `combined`（合并稿含多群内容）时不会发，避免串群。\n"
                         "发送记录：`data/summary_sent.jsonl`",
-              "suggest": '想先演练就填：{"dry_run": true, "chunk_chars": 1800, "min_interval_s": 2}；'
-                         '确认无误后改成：{"dry_run": false}'},
+              "suggest": '想先演练就填：{"dry_run": true, "refine": true, "chunk_chars": 1800, '
+                         '"min_interval_s": 2}；确认无误后改成：{"dry_run": false}'},
          ]},
         {"key": "voice", "title": "语音捕获", "fields": [
              {"path": "voice.enabled", "label": "启用语音捕获", "kind": "bool",

@@ -272,9 +272,60 @@ check("发群调用在总结成功之后", loop_src.index("summarize_mod.summari
 check("digest.summarize 关掉时不会走到发群",
       "if self.digest_summarize:" in loop_src)
 
+print("\n[J] 发进群的稿子**不含聊天记录**（二次提炼，10-12 用户要求）")
+from consumer.group_summary import REFINE_PROMPT, refine_for_group  # noqa: E402
+check("提炼提示词要求不含聊天记录", "不要包含聊天记录" in REFINE_PROMPT)
+check("提炼提示词禁止逐条转述/点名", "不要逐条转述" in REFINE_PROMPT and "某某说" in REFINE_PROMPT)
+check("提炼提示词禁止时间戳", "不要带时间戳" in REFINE_PROMPT)
+check("提炼提示词要求按主题归纳", "主题" in REFINE_PROMPT and "归纳" in REFINE_PROMPT)
+check("提炼提示词只喂归档总结、不喂原始记录",
+      "{summary}" in REFINE_PROMPT and "{body}" not in REFINE_PROMPT)
+
+# 提炼失败要回退（返回空串，调用方据此用原稿）
+import consumer.summarize as _sum  # noqa: E402
+_real_call = _sum.call_llm
+
+
+def _boom(*a, **k):
+    raise RuntimeError("模拟 LLM 失败")
+
+
+_sum.call_llm = _boom
+try:
+    r = refine_for_group("原稿内容", {"base_url": "x", "model": "m"})
+    check("提炼失败返回空（调用方据此回退原稿）", r == "", repr(r))
+except Exception as e:  # noqa: BLE001
+    check(f"提炼失败不该抛异常（{type(e).__name__}）", False)
+_sum.call_llm = lambda *a, **k: "原稿内容"
+check("提炼结果与原稿相同视为失败（避免等于没提炼）",
+      refine_for_group("原稿内容", {"base_url": "x", "model": "m"}) == "")
+_sum.call_llm = lambda *a, **k: "- 今日讨论了取用神思路\n- 安排：明晚讲纳甲"
+check("提炼成功返回成品稿",
+      refine_for_group("详细稿", {"base_url": "x", "model": "m"}).startswith("- "))
+check("空原稿不调模型", refine_for_group("", {"base_url": "x", "model": "m"}) == "")
+_sum.call_llm = _real_call
+
+# Consumer 接线：发群前会提炼，且提炼失败回退
+send2 = inspect.getsource(Consumer._send_summaries_to_groups)
+check("发群前调用提炼", "refine_for_group" in send2)
+check("提炼可用 refine=false 关掉", 'gcfg.get("refine", True)' in send2)
+check("提炼失败回退原稿（不阻断发送）", "改用归档原稿发送" in send2)
+check("提炼后仍走 make_messages 渲染（且提炼在渲染之前）",
+      # ⚠️ 不能用 s.index("make_messages") —— 它在函数开头的 import 行就出现了，
+      #    那样比的是 import 顺序而不是调用顺序（踩过）。要比**调用点**。
+      send2.index("refined = refine_for_group(") < send2.index("msgs = make_messages("),
+      f"{send2.find('refined = refine_for_group(')} vs {send2.find('msgs = make_messages(')}")
+# 页面/设置也要写清楚
+tpl2 = (PROJ / "web" / "templates" / "_monitor_block.html").read_text(encoding="utf-8")
+check("监控页说明『发进群的内容不含聊天记录』", "不含聊天记录" in tpl2)
+check("监控页提到 refine 可关", "refine" in tpl2)
+app2 = (PROJ / "web" / "app.py").read_text(encoding="utf-8")
+check("设置页说明了 refine 参数", "`refine`" in app2)
+check("设置页说明归档仍是详细稿", "只有**发进群的那份**会被二次提炼" in app2)
+
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)
 if FAILS:
     print("FAILED:", FAILS)
     sys.exit(1)
-print("总结发到群（每群勾选为唯一开关 + 与自动回复独立）验证通过")
+print("总结发到群（每群勾选为唯一开关 + 与自动回复独立 + 发前提炼不含聊天记录）验证通过")
