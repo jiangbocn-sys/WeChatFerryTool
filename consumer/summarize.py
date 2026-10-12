@@ -41,6 +41,7 @@ from consumer.digest import (  # noqa: E402
     _monitored_groups,
     _render_content,
     _summary_hint,
+    starred_voice_note,
 )
 from paths import data_root  # noqa: E402
 
@@ -115,7 +116,10 @@ def _hints_block(hints: list[tuple[str, str]]) -> str:
         return ""
     rule = ("9. **下面「本群总结提示」是群主对本群总结口径的要求，优先级高于上面的通用要求**："
             "按提示决定该保留什么、该剔除什么（提示里点名的内容算正文；提示之外的噪音直接丢掉、"
-            "不要写进总结）；若提示与本记录的实际情况不符，以记录为准并照常总结")
+            "不要写进总结）；若提示与本记录的实际情况不符，以记录为准并照常总结。\n"
+            "   ⚠️ **提示里如果要求输出时间（例如「提示语音发送时间」），那就照做** —— "
+            "上面第 2 条「输出不需要逐条标注时间」是**默认值**，被本群提示覆盖；"
+            "该给时间的地方必须给 `HH:MM`（记录里每行开头的 `[HH:MM]` 就是该时刻）。")
     lines = [rule, "", "本群总结提示："]
     for gname, hint in hints:
         lines.append(f"- 【{gname}】{hint}")
@@ -516,12 +520,16 @@ def summarize_range(gid: str, start: str, end: str, extra_requirement: str = "",
 
 
 def build_prompt(date_str: str, grouped: dict[str, list[str]],
-                 labels: dict | None = None) -> str:
+                 labels: dict | None = None, rows: list | None = None) -> str:
     """把分组后的记录拼成 prompt。
 
     `grouped` 的键可以是**群 id**（新）或**群显示名**（旧调用点，会用 labels 反查 id）。
     每个群的「总结提示」（`labels.groups.<id>.summary_hint`）会作为独立段落一起提交，
     让模型按群主的口径决定保留什么、剔除什么噪音。
+
+    `rows`：原始消息行（可选）。传了就额外附一段**加星成员的语音发送时间**清单
+    （确定性提取，见 `digest.starred_voice_note`）—— 否则模型容易因为"没内容"和
+    "不用标时间"两条规则把语音时间丢掉（2026-10-13 用户报过这个问题）。
     """
     if labels is None:
         try:
@@ -542,11 +550,36 @@ def build_prompt(date_str: str, grouped: dict[str, list[str]],
         blocks.append(f"### 群：{gname}（{len(lines)} 条）")
         blocks.extend(lines)
         blocks.append("")
+    # 加星成员语音时间清单（确定性，不依赖模型自己发现）。
+    # ⚠️ 必须独立成段并**显式要求写进总结**：这些语音**内容未获取**（PC 微信不落盘音频），
+    #    读者只有靠这条提醒才知道"群里还有重要语音，得自己回去看"（2026-10-13 用户要求）。
+    voice_note = ""
+    if rows:
+        try:
+            voice_note = starred_voice_note(rows, labels)
+        except Exception:  # noqa: BLE001
+            voice_note = ""
     # 注意用 replace 而不是 str.format：body 里含 `{`／`}`（XML/JSON 片段）会炸 format
-    return (PROMPT_TEMPLATE
-            .replace("{date}", date_str)
-            .replace("{extra_rules}", _hints_block(hints))
-            .replace("{body}", "\n".join(blocks).strip()))
+    out = (PROMPT_TEMPLATE
+           .replace("{date}", date_str)
+           .replace("{extra_rules}", _hints_block(hints))
+           .replace("{body}", "\n".join(blocks).strip()))
+    if voice_note:
+        # ⚠️ 必须插在"请开始总结"这句**之前**：放在其后会让模型以为清单是补充说明而忽略
+        #    （2026-10-13 实测：清单落在收尾指令之后，位置很像"附录"）。
+        tail = "请开始总结（只输出总结内容，不要重复贴回原文）："
+        add = (voice_note +
+               "\n**关于上面这段语音清单的处理要求（重要）**：这些语音的**内容我们没有拿到**"
+               "（转写缺失），所以正文里无从引用；但**读者需要知道「群里还有这些语音，"
+               "值得自己回去听」**。"
+               "因此请在总结**最后单独加一行**（原文照抄格式，人名与时间用清单里的）：\n"
+               "`提醒：本时段 ★某某 于 HH:MM 起发了 N 条语音（内容未获取），请回群自行查看`\n"
+               "有多位加星成员时，一行里用「、」并列；没有任何加星成员语音时**不要写这一行**。\n\n")
+        if tail in out:
+            out = out.replace(tail, add + tail, 1)
+        else:
+            out += "\n\n" + add
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +632,23 @@ def strip_think(text: str) -> str:
         else:
             out = out[: out.index("<think>")]
     return out.strip()
+
+
+def load_window_rows(date_str: str, db_path: Path | None = None) -> list:
+    """取该窗口的**原始消息行**（与归档/总结同一口径）。
+
+    给 `build_prompt(rows=...)` 用：加星成员的语音发送时间清单要从原始行里
+    按 `msg_type=34` + `focus_members` 提取，光看渲染好的文本行容易被"内容不可得"淹没。
+    """
+    from consumer.digest import _digest_window_for     # 局部 import 避免循环依赖
+    start_ts, end_ts = _digest_window_for(date_str)
+    db_file = db_path or (PROJECT_DIR / "data" / "messages.db")
+    if not db_file.is_file():
+        return []
+    try:
+        return _load_rows(db_file, start_ts, end_ts)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def collect(date_str: str, db_path: Path | None = None) -> tuple[dict[str, list[str]], int] | None:
@@ -760,13 +810,15 @@ def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = 
 
     if print_prompt:
         labels = _load_labels(LABELS_PATH)
+        # 预览也带上原始行 → 能看到"加星成员语音发送时间"清单（与实际提交一致）
+        _prev_rows = load_window_rows(date_str)
         if run_mode == "per_group":
             for gid, lines in grouped.items():
                 gname = name_for_gid(gid, labels)
                 _safe_print(f"\n########## {gname}（{len(lines)} 条）##########")
-                _safe_print(build_prompt(date_str, {gid: lines}, labels))
+                _safe_print(build_prompt(date_str, {gid: lines}, labels, rows=_prev_rows))
         else:
-            _safe_print(build_prompt(date_str, grouped))
+            _safe_print(build_prompt(date_str, grouped, labels, rows=_prev_rows))
         return None
 
     llm_cfg = _llm_cfg()
@@ -784,9 +836,12 @@ def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = 
 
     run = SummarizeRun(date=date_str, mode=run_mode, total=total)
     used: set[str] = set()
+    # 加星成员的语音发送时间清单需要**原始消息行**（渲染后的文本行里那些语音只是
+    # "内容不可得"占位符，模型不会从中提取时间）。取一次、各群复用。
+    win_rows = load_window_rows(date_str)
     for gid, sub_grouped, sub_total in chunks:
         gname = name_for_gid(gid, labels) if gid else ""
-        prompt = build_prompt(date_str, sub_grouped, labels)
+        prompt = build_prompt(date_str, sub_grouped, labels, rows=win_rows)
         log.info("[%s] %d 条，prompt %d 字", gname or "合并", sub_total, len(prompt))
         try:
             summary = strip_think(call_llm(prompt, llm_cfg))

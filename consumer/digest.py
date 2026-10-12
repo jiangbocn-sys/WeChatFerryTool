@@ -316,6 +316,70 @@ def revoked_originals(revoke_rows: list, db_file: Path | None = None) -> dict[st
     return out
 
 
+def starred_voice_note(rows: list, labels: dict) -> str:
+    """列出**加星（★重点）成员**发语音的**发送时间**，让总结能确定性带上它（2026-10-13）。
+
+    为什么需要（用户报"提示语音时间没出现在总结里"的排查结论）
+    --------------------------------------------------------
+    用户在群提示里写了"加星人员发语音就提示语音发送时间"，但最近一次总结只顺带提了一处。原因：
+      1. **全局规则 2 写着「输出不需要逐条标注时间」** → 与本群提示**直接冲突**，
+         模型倾向遵守更显眼的全局格式规则；
+      2. 加星成员的语音**经常没有转写文本**（PC 微信不落盘音频，见
+         `docs/wechat-media-forensics.md`），行里只是"内容不可得"占位符，
+         模型按规则 6「忽略无实质内容的发言」顺手丢掉。
+
+    所以这里把"谁在几点发了语音、连续几段"**显式、确定性地**摆到 prompt 里，
+    不再指望模型自己去几百行记录里发现。**只列时间与条数，绝不编造内容**。
+    """
+    if not rows or not labels:
+        return ""
+    focus_by_group: dict[str, set] = {}
+    for gid, ent in (labels.get("groups") or {}).items():
+        f = (ent or {}).get("focus_members") or []
+        if f:
+            focus_by_group[str(gid)] = {str(x) for x in f}
+    if not focus_by_group:
+        return ""
+    from collections import defaultdict
+    # ⚠️ 按**人**聚合（不是按 群+人）：同一个人可能跨几个时段发语音，
+    #    分成多行会让提醒读起来像两个人（2026-10-13 实测踩到：周宏伟出现两行）。
+    seqs: dict[str, list[int]] = defaultdict(list)
+    gid_of: dict[str, str] = {}
+    for r in rows:
+        try:
+            if int(r["msg_type"] or 0) != 34:
+                continue
+            gid = str(r["group_name"] or "")
+            snd = str(r["sender"] or "")
+            if snd not in focus_by_group.get(gid, ()):
+                continue
+            ts = int(r["received_at"] or 0)
+            if ts:
+                seqs[snd].append(ts)
+                gid_of.setdefault(snd, gid)
+        except Exception:  # noqa: BLE001
+            continue
+    if not seqs:
+        return ""
+    out = ["**加星（重点关注）成员的语音发送时间**（机器提取；这些语音**内容未获取**，"
+           "请在总结中提醒读者回群自行查看）："]
+    for snd, tss in sorted(seqs.items(), key=lambda kv: min(kv[1])):
+        tss.sort()
+        merged: list[list[int]] = []          # 间隔 <= 120 秒算同一串连续语音
+        for ts in tss:
+            if merged and ts - merged[-1][-1] <= 120:
+                merged[-1].append(ts)
+            else:
+                merged.append([ts])
+        parts = []
+        for gp in merged:
+            a = datetime.fromtimestamp(gp[0]).strftime("%H:%M")
+            parts.append(f"{a} 起（{len(gp)} 条）" if len(gp) > 1 else a)
+        sname = (((labels.get("senders") or {}).get(snd) or {}).get("name")) or snd
+        out.append(f"- {sname}：共 {len(tss)} 条语音，时间 " + "、".join(parts))
+    return "\n".join(out) + "\n"
+
+
 def _render_content(m: sqlite3.Row, img_desc: str = "", revoked_original: str = "") -> str:
     """归档里每条消息的单行摘要。
 
