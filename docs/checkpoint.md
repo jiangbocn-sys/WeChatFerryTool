@@ -173,9 +173,11 @@
 * **把每日总结发到群（10-10 需求）**：用户在「🎯 监控规则」页**按群勾选**「把总结发到群内」，
   勾选后每日总结生成完自动发进该群。因为**这是本项目唯一会主动往群里发言的功能**，
   实现以"保守、可关、可审计"为第一原则：
-  * **双重开关**：每群 `labels.groups.<gid>.send_summary`（默认关，勾选框写入）
-    **且** 全局 `digest.send_to_group.enabled`（config.yaml，默认关）—— 两者都为真才发；
-    想临时全停只改总闸一处。
+  * **唯一开关 = 每群勾选**（用户 10-12 明确要求**删掉全局总闸选项**）：
+    `labels.groups.<gid>.send_summary`（默认关，勾选框写入）；勾上即发、取消即停。
+    `config.yaml` 的 `digest.send_to_group` 段**只剩调参**（`dry_run` / `chunk_chars` /
+    `min_interval_s`），**没有 enabled**；`SummarySender.enabled_globally()` 已删除，
+    设置页那一项改名为「总结发群的高级参数（dry_run / 切分 / 限速）」并写明"这里没有开关"。
   * **只发本群自己的那份**：`summarize_mode=combined`（合并稿含多群内容）时**一条都不发**；
     只发 `@chatroom`（私聊不发）。
   * `consumer/group_sender.py`（新）：`md_to_plain()`（Markdown→微信纯文本，
@@ -190,7 +192,8 @@
     （需总闸、有风控风险、建议先 dry_run、combined 不发、审计日志路径）；
     `group_rows` 带 `send_summary`；`save_hints` 动作同时处理 `hint_<gid>` 与 `send_<gid>`
     （取消勾选 = 删键）。
-  * 设置页新增总闸字段 `digest.send_to_group`（json）。
+  * 设置页那一项改名为「总结发群的高级参数（dry_run / 切分 / 限速）」，
+    **只放调参、没有开关**（用户 10-12 明确要求删掉那个总闸选项）。
   回归：`wft_group_send_check`（清洗/切分纯函数、**双重开关**、失败不抛且审计、
   SentTracker 记账、Consumer 三处安全判断、模板与保存动作、**走 flask 测试客户端的真实保存流程**）；
   **全部用假 hook，绝不真发消息**。
