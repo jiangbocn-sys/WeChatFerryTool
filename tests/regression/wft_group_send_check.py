@@ -323,6 +323,43 @@ app2 = (PROJ / "web" / "app.py").read_text(encoding="utf-8")
 check("设置页说明了 refine 参数", "`refine`" in app2)
 check("设置页说明归档仍是详细稿", "只有**发进群的那份**会被二次提炼" in app2)
 
+print("\n[K] 提炼不能把「语音提醒行」删掉（10-13 用户报：发到群里没有提醒）")
+# 实测问题：归档稿里有 `- 提醒：本时段 ★… 请回群自行查看`，
+# 但提炼时被模型当噪音整行删掉（1071 字 → 343 字），于是**发进群的内容没有提醒**。
+from consumer.group_summary import (  # noqa: E402
+    REFINE_PROMPT as RP2, ensure_reminder, extract_reminder)
+REM = ("- 提醒：本时段 ★周宏伟 于 10:28/22:39 起共发 84 条语音、"
+       "★无咎（海微） 于 23:36 起发 4 条语音（内容均未获取），请回群自行查看")
+SRC = "- 要点一：讲了取用神\n- 要点二：安排明晚讲纳甲\n" + REM
+check("提炼提示词要求保留提醒行", "必须原样保留" in RP2 and "提醒：本时段" in RP2)
+check("提炼提示词说明该行不受 500 字限制", "不限制这一行" in RP2)
+check("extract_reminder 能取到提醒行", extract_reminder(SRC).startswith("- 提醒：本时段"))
+check("extract_reminder 容忍前导被吃掉（无 '- '）",
+      extract_reminder("提醒：本时段 ★A 于 10:00 发了 1 条语音（内容未获取），请回群自行查看")
+      .startswith("- 提醒"))
+check("无提醒行时 extract_reminder 返回空", extract_reminder("- 要点一\n- 要点二") == "")
+check("ensure_reminder：提炼丢了就补回",
+      extract_reminder(ensure_reminder("- 归纳一\n- 归纳二", SRC)).startswith("- 提醒"))
+check("ensure_reminder：提炼保留了就不重复加",
+      ensure_reminder("- 归纳一\n" + REM, SRC).count("提醒：本时段") == 1)
+check("ensure_reminder：原稿本来没有提醒时不凭空造",
+      ensure_reminder("- 归纳一", "- 要点一") == "- 归纳一")
+check("ensure_reminder：提醒行加在**最后一行**",
+      ensure_reminder("- 归纳一\n- 归纳二", SRC).strip().splitlines()[-1].startswith("- 提醒"))
+
+# 真实走一遍 refine_for_group，但把 LLM 桩成"会删提醒"的模型
+_sum.call_llm = lambda *a, **k: "- 归纳一：讨论卦例\n- 归纳二：安排后续"
+got = refine_for_group(SRC, {"base_url": "x", "model": "m"})
+check("**模型删掉提醒时，refine_for_group 会兜底补回**",
+      extract_reminder(got).startswith("- 提醒"), got[-80:])
+_sum.call_llm = lambda *a, **k: "- 归纳一：讨论卦例\n" + REM
+got2 = refine_for_group(SRC, {"base_url": "x", "model": "m"})
+check("模型保留了提醒时不重复", got2.count("提醒：本时段") == 1)
+_sum.call_llm = _real_call
+# Consumer 侧：提炼后仍走同一函数（因此兜底生效）
+check("发群调用的是 refine_for_group（兜底在同一函数内）",
+      "refine_for_group" in send2)
+
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)
 if FAILS:

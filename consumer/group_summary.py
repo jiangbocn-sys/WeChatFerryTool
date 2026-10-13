@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 log = logging.getLogger("consumer.group_summary")
 
@@ -39,11 +40,46 @@ REFINE_PROMPT = """下面是一份**供内部归档使用的**群聊总结稿。
    不要加标题、不要加落款、不要写"以下是总结"。
 6. 若原稿信息很少，就只写这一两句，不要为凑条数而扩写或编造。
 7. 不要输出任何与改写无关的解释或客套话。
+8. **⚠️ 原稿里如果有一行以「提醒：本时段」开头的语音提醒（形如
+   `提醒：本时段 ★某某 于 HH:MM 起发了 N 条语音（内容未获取），请回群自行查看`），
+   必须原样保留在改写结果的最后一行、一个字都不要改**：
+   它的作用正是告诉群里的人"还有这些语音没拿到内容、请自己回去听"，
+   属于**对读者有用的信息**，不在"要剔除的聊天记录"之列。
+   注意：第 5 条"总长不超过 500 字"**不限制这一行**，不要为了压字数把它删掉。
 
 原稿：
 {summary}
 
 请直接输出改写后的成品（只输出要点，每行以「- 」开头）："""
+
+
+#: 语音提醒行的识别正则（形状见 REFINE_PROMPT 第 8 条）。
+#: 用正则而不是固定前缀：模型可能把前导的 `- ` 丢掉、或前后有空白。
+REMINDER_RE = re.compile(r"提醒：本时段.*?请回群自行查看[^\n]*")
+
+
+def extract_reminder(text: str) -> str:
+    """从文本里取出语音提醒行（规范化成 `- 提醒：…` 一行）。取不到返回空串。"""
+    m = REMINDER_RE.search(text or "")
+    if not m:
+        return ""
+    return "- " + m.group(0).strip().lstrip("-").strip()
+
+
+def ensure_reminder(refined: str, source: str) -> str:
+    """**程序保证**提炼结果里有语音提醒行（不依赖模型自觉）。
+
+    2026-10-13 实测问题：归档稿里有提醒行，但提炼时被模型当噪音删掉了
+    （1071 字 → 343 字，提醒行整行消失），于是**发进群的内容里没有提醒**。
+    提示词里已加了第 8 条硬要求；这里再加一道兜底：提炼结果若丢了就补回去。
+    """
+    want = extract_reminder(source)
+    if not want:
+        return refined
+    if extract_reminder(refined):
+        return refined                      # 已经保留了
+    out = (refined or "").rstrip()
+    return (out + "\n" + want) if out else want
 
 
 def refine_for_group(summary: str, llm_cfg: dict, date_str: str = "",
@@ -70,4 +106,8 @@ def refine_for_group(summary: str, llm_cfg: dict, date_str: str = "",
     if out == src:
         log.warning("总结提炼结果与原稿完全相同（视为未提炼，回退用原稿）")
         return ""
+    # ⚠️ 兜底：语音提醒行必须留下（实测模型会把它当噪音删掉 → 发进群里就没有提醒了）
+    if extract_reminder(src) and not extract_reminder(out):
+        log.info("提炼把语音提醒行删掉了，已按程序兜底补回")
+        out = ensure_reminder(out, src)
     return out
