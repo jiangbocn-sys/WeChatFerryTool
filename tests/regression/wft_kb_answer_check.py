@@ -91,7 +91,7 @@ N.distill_text = fake_distill            # 桩：不打网络
 rep = N.distill_group(DOCS, GROUP, DATA, llm={"fake": True}, dry_run=False)
 check("两份资料都蒸了", len(rep.new) == 2 and rep.notes_written == 2, str(rep.new))
 check("桩调用 2 次", calls["n"] == 2, str(calls["n"]))
-root = N.kb_root(DATA, GROUP)
+root = N.kb_root(DATA, GROUP, str(DOCS))   # 笔记根**由资料目录决定**（多群共用一套）
 check("台账已落盘", (root / "_sources.json").is_file())
 check("索引已生成", (root / "_index.md").is_file())
 ents = N.load_sources(root)
@@ -128,7 +128,7 @@ rep4 = N.distill_group(DOCS, GROUP, DATA, llm={"fake": True}, dry_run=False)
 check("版本变化触发重蒸", len(rep4.updated) == 2, str(rep4.updated))
 
 print("\n[E] 检索（BM25 + 主题加权）")
-secs = A.load_sections(GROUP, DATA)
+secs = A.load_sections(GROUP, DATA, str(DOCS))
 check("载入到片段", len(secs) >= 2, str(len(secs)))
 hits = A.retrieve("寅午戌三合局需要什么条件", secs, top_k=3)
 check("相关问题命中三合局", hits and "三合" in (hits[0].topic + hits[0].text),
@@ -171,7 +171,7 @@ real_call = None
 import consumer.summarize as S  # noqa: E402
 real_call = S.call_llm
 S.call_llm = A_answer_call
-res = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, self_check=True)
+res = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, kb_dir=str(DOCS), self_check=True)
 check("生成了回答", bool(res.answer) and "三合" in res.answer, res.answer[:60])
 check("prompt 里含强制引用要求", "〔来源：" in res.prompt or "必须标出处" in res.prompt)
 check("prompt 里含资料片段", "寅午戌" in res.prompt)
@@ -184,7 +184,7 @@ S.call_llm = make_llm(
     "按资料，三合需要三者俱全。〔来源：三合局笔记.txt「三合局要点」〕"
     "另外老师说这个卦主会在三天内发财。",
     "无依据\n另外老师说这个卦主会在三天内发财。", rec2)
-res2 = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, self_check=True)
+res2 = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, kb_dir=str(DOCS), self_check=True)
 check("**越界内容被删掉**", "三天内发财" not in res2.answer, res2.answer[:80])
 check("自检标记为未通过", res2.grounded is False)
 check("保留了有依据的部分", "三者俱全" in res2.answer)
@@ -192,7 +192,7 @@ check("越界内容被留证", "三天内发财" in res2.dropped, res2.dropped[:
 # 全是越界 → 兜底
 rec3: dict = {}
 S.call_llm = make_llm("老师明天会讲新卦例。", "无依据\n老师明天会讲新卦例。", rec3)
-res3 = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, self_check=True)
+res3 = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, kb_dir=str(DOCS), self_check=True)
 check("**整体越界 → 走兜底话术**", "未涉及" in res3.answer, res3.answer[:60])
 
 print("\n[H] 自检异常 / 空回答")
@@ -206,11 +206,11 @@ def boom(prompt, llm, timeout_s=120.0):
 
 
 S.call_llm = boom
-res4 = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, self_check=True)
+res4 = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, kb_dir=str(DOCS), self_check=True)
 check("自检失败**不假装通过**（grounded=None）", res4.grounded is None, str(res4.grounded))
 check("自检失败仍保留回答（不白费）", "三者俱全" in res4.answer, res4.answer[:60])
 S.call_llm = lambda *a, **k: ""
-res5 = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, self_check=True)
+res5 = A.answer_question("寅午戌三合局需要什么条件", GROUP, DATA, kb_dir=str(DOCS), self_check=True)
 check("空回答 → 兜底话术", "未涉及" in res5.answer, res5.answer[:60])
 S.call_llm = real_call
 
@@ -219,9 +219,44 @@ empty_root = N.kb_root(DATA, "空群")
 res6 = A.answer_question("随便问问", "空群", DATA, self_check=False)
 check("空资料库 → 明确提示", "资料库为空" in res6.answer or "未涉及" in res6.answer,
       res6.answer[:50])
-res7 = A.answer_question("今天中午吃什么", GROUP, DATA, self_check=False)
+res7 = A.answer_question("今天中午吃什么", GROUP, DATA, kb_dir=str(DOCS), self_check=False)
 check("无关问题 → 不编造，走兜底", "未涉及" in res7.answer, res7.answer[:60])
 check("无关问题不调 LLM（0 次）", res7.llm_calls == 0, str(res7.llm_calls))
+
+print("\n[J] 多群共用同一资料目录 → **同一套笔记（不重复蒸馏）**")
+# 用户 2026-10-15 明确要求：多个群用同一个资料目录，不该再单独蒸馏一遍。
+# 所以笔记根**由资料目录决定**，与群名无关 —— 零配置。
+_root_a = N.kb_root(DATA, "弟子群", str(DOCS))
+_root_b = N.kb_root(DATA, "六爻排盘APP试用", str(DOCS))
+_root_c = N.kb_root(DATA, "随便什么群名", str(DOCS))
+check("**同一目录 → 同一笔记根**（与群名无关）",
+      _root_a == _root_b == _root_c, f"{_root_a.name} / {_root_b.name} / {_root_c.name}")
+check("笔记根名 = 资料目录名", _root_a.name == DOCS.name, _root_a.name)
+_other = SC / "另一个资料目录"
+_other.mkdir(exist_ok=True)
+(_other / "别的.txt").write_text("别的内容", encoding="utf-8")
+_root_d = N.kb_root(DATA, "弟子群", str(_other))
+check("**不同目录 → 不同笔记根**（不会串）", _root_d != _root_a,
+      f"{_root_d.name} vs {_root_a.name}")
+# 共用后：蒸馏一次，另一个群名也能读到同样内容
+_sections_b = A.load_sections("六爻排盘APP试用", DATA, str(DOCS))
+check("**用另一个群名也能读到同一套笔记**", len(_sections_b) == len(secs),
+      f"{len(_sections_b)} vs {len(secs)}")
+_hits_b = A.retrieve("寅午戌三合局需要什么条件", _sections_b, top_k=3)
+check("共享笔记的检索同样有效", bool(_hits_b) and "三合" in (_hits_b[0].topic + _hits_b[0].text),
+      _hits_b[0].topic if _hits_b else "(无命中)")
+# 重名但不同路径的目录 → 加短哈希区分（不串）
+_dup = SC / "dupA" / "同名"
+_dup.mkdir(parents=True, exist_ok=True)
+(_dup / "x.txt").write_text("A", encoding="utf-8")
+_dup2 = SC / "dupB" / "同名"
+_dup2.mkdir(parents=True, exist_ok=True)
+(_dup2 / "x.txt").write_text("B", encoding="utf-8")
+_r1 = N.kb_root(DATA, "g", str(_dup))
+_r2 = N.kb_root(DATA, "g", str(_dup2))
+check("**同名不同路径的目录不会串**（加短哈希）", _r1 != _r2, f"{_r1.name} vs {_r2.name}")
+check("没给 kb_dir 时退回按群名（兼容旧调用）",
+      N.kb_root(DATA, "某群").name == "某群", N.kb_root(DATA, "某群").name)
 
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)

@@ -128,9 +128,100 @@ class DistillReport:
 # 路径与台账
 # ---------------------------------------------------------------------------
 
-def kb_root(data_root: Path, group: str) -> Path:
-    """某群的笔记根目录（`<数据根>/kb/<群名安全化>`）。"""
+def _kb_dir_map(data_root: Path) -> dict[str, str]:
+    """资料目录名 → 实际路径（扫 `配置文件所在目录/kb_dirs.txt`，一行一个目录）。
+
+    这一层是为了**多群共用一份资料只蒸馏一次**：真实路径里可能有 `D:\\...` 这种
+    在目录名里不合法/不好看的字符，所以用"目录名"当笔记根名，
+    再用这个映射把"目录名 → 真实路径"记下来，避免同名不同路径撞车。
+    """
+    out: dict[str, str] = {}
+    for p in _kb_dir_map_candidates(data_root):
+        if not p.is_file():
+            continue
+        try:
+            for raw in p.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                d = Path(line)
+                out[d.name] = str(d)
+        except OSError:
+            continue
+        break
+    return out
+
+
+def _kb_dir_map_candidates(data_root: Path) -> list[Path]:
+    cands: list[Path] = []
+    try:
+        import paths
+        cands.append(Path(paths.config_path()).parent / "kb_dirs.txt")
+    except Exception:  # noqa: BLE001
+        pass
+    cands.append(Path(data_root) / "kb" / "_dirs.txt")
+    return cands
+
+
+def _auto_slug(kb_dir: str | Path, data_root: Path) -> str:
+    """资料目录 → 笔记根名（默认取目录名；重名冲突时加短哈希区分）。
+
+    用户 2026-10-15 明确要求：**多个群用同一个资料目录，就不该再单独蒸馏一遍**。
+    所以笔记根**由资料目录决定**，与群名无关 —— 同一个目录天然共用一套笔记，
+    **零配置**（不需要在 config.yaml 里手工写映射）。
+    """
+    d = Path(kb_dir)
+    name = (d.name or "kb").strip() or "kb"
+    # 与另一个同名但**不同路径**的目录冲突时加短哈希（8 位），保证不会串。
+    # ⚠️ 只有"记录里的那个目录**当前仍然存在**"才算真冲突：
+    #    否则临时目录/已删除目录的历史记录会让新目录被误判成重名而加哈希
+    #    （2026-10-15 踩到：上一次回归留下的 `同名` 记录把新目录顶掉了）。
+    known = _kb_dir_map(data_root)
+    other = known.get(name)
+    if other:
+        op = Path(other)
+        try:
+            conflict = op.is_dir() and str(op) != str(d)
+        except OSError:
+            conflict = False
+        if conflict:
+            h = hashlib.sha1(str(d).lower().encode("utf-8")).hexdigest()[:8]
+            name = f"{name}-{h}"
+    return name
+
+
+def _remember_kb_dir(data_root: Path, kb_dir: str | Path, slug: str) -> None:
+    """把「目录名 → 真实路径」记下来（供下次判断是否重名冲突）。"""
+    import paths
+    try:
+        p = Path(paths.config_path()).parent / "kb_dirs.txt"
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        cur = set()
+        if p.is_file():
+            cur = {ln.strip() for ln in p.read_text(encoding="utf-8").splitlines()
+                   if ln.strip() and not ln.startswith("#")}
+        line = str(Path(kb_dir))
+        if line not in cur:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except OSError as e:
+        log.debug("记录 kb_dirs 失败: %s", e)
+
+
+def kb_root(data_root: Path, group: str, kb_dir: str | Path | None = None) -> Path:
+    """某群的笔记根目录。
+
+    **有 `kb_dir` 时按资料目录定根**（多个群用同一目录 → 自动共用一套笔记）；
+    没给 `kb_dir` 时才退回按群名（兼容旧调用与手工实验）。
+    """
     from consumer.summarize import safe_name       # 复用已有的文件名安全化
+    if kb_dir:
+        slug = _auto_slug(kb_dir, data_root)
+        _remember_kb_dir(data_root, kb_dir, slug)
+        return Path(data_root) / "kb" / safe_name(slug, fallback="kb")
     return Path(data_root) / "kb" / safe_name(group, fallback="group")
 
 
@@ -171,6 +262,100 @@ def save_sources(root: Path, entries: dict[str, SourceEntry]) -> None:
 
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _match_kb_dir(entry_root: Path, candidates: list[Path]) -> Path | None:
+    """把一份台账匹配到它的资料目录（按文件名 + 指纹，可靠且不靠猜）。
+
+    匹配依据：台账里记了每个文件的 `size`（必要时再比 sha256）；
+    资料目录里存在**同名同大小**的文件 → 认定为该目录。
+    这样即使目录名与笔记目录名不同（例如笔记叫"弟子群"、目录也叫"弟子群"但换了盘符）
+    也能对上；对不上就返回 None（迁移时只报告、不乱动）。
+    """
+    entries = load_sources(entry_root)
+    if not entries:
+        return None
+    best: tuple[int, Path] | None = None
+    for cand in candidates:
+        if not cand.is_dir():
+            continue
+        score = 0
+        for rel, ent in entries.items():
+            f = cand / rel
+            if not f.is_file():
+                continue
+            want = int((ent.fingerprint or {}).get("size") or -1)
+            try:
+                if want >= 0 and f.stat().st_size == want:
+                    score += 1
+            except OSError:
+                continue
+        if score and (best is None or score > best[0]):
+            best = (score, cand)
+    return best[1] if best else None
+
+
+def migrate_to_dir_keyed(data_root: Path, kb_base_dirs: list[Path],
+                         apply: bool = False) -> list[str]:
+    """把"按群名"的旧笔记目录改成"按资料目录"命名（多群共用一份资料不再重复蒸馏）。
+
+    返回给 CLI/页面显示的说明行。`apply=False` 时只报告计划（不动文件）。
+    """
+    from consumer.summarize import safe_name
+    root = Path(data_root) / "kb"
+    out: list[str] = []
+    if not root.is_dir():
+        return ["（没有 kb 目录，无需迁移）"]
+    # 候选资料目录：各资料根下的一级/二级子目录（够用；层级更深时人工配置）
+    candidates: list[Path] = []
+    for base in kb_base_dirs:
+        if not base.is_dir():
+            continue
+        candidates.append(base)
+        for p in sorted(base.iterdir()):
+            if p.is_dir():
+                candidates.append(p)
+    for d in sorted(root.iterdir()):
+        if not d.is_dir() or d.name.startswith("_"):
+            continue
+        src = _match_kb_dir(d, candidates)
+        if src is None:
+            out.append(f"⏭️  {d.name}：**匹配不到资料目录**（保留原样，需要人工确认）")
+            continue
+        target_name = safe_name(_auto_slug(src, data_root), fallback="kb")
+        if target_name == d.name:
+            _remember_kb_dir(data_root, src, target_name)
+            out.append(f"✅ {d.name}：已符合「按资料目录」命名（{src}）")
+            continue
+        target = root / target_name
+        if target.exists():
+            out.append(f"⚠️  {d.name} → {target_name} 目标已存在，**跳过**（请人工合并）")
+            continue
+        if apply:
+            try:
+                d.rename(target)
+                _remember_kb_dir(data_root, src, target_name)
+                out.append(f"📦 {d.name} → {target_name}（资料目录 {src}）")
+            except OSError as e:
+                out.append(f"❌ {d.name} → {target_name} 失败：{e}")
+        else:
+            out.append(f"📦 计划：{d.name} → {target_name}（资料目录 {src}）")
+    return out
+
+
+def collect_kb_dirs(data_root: Path, groups: list[tuple[str, str]]) -> list[Path]:
+    """从 [(群名, kb_dir)] 收集去重后的资料目录（用于迁移时当候选）。"""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for _name, d in groups:
+        if not d:
+            continue
+        p = Path(d)
+        k = str(p).lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(p)
+    return out
 
 
 def note_name_for(rel: str) -> str:
@@ -330,7 +515,7 @@ def distill_group(kb_dir: Path, group: str, data_root: Path, llm: dict,
     """
     from consumer.summarize import safe_name
     allow = tuple(allow_ext or EX.DEFAULT_EXT)
-    root = kb_root(data_root, group)
+    root = kb_root(data_root, group, kb_dir)   # 按资料目录定根 → 多群共用一份笔记
     rep = DistillReport(group=group, dry_run=dry_run)
     entries = load_sources(root)
 

@@ -48,3 +48,4 @@ tools/.account_snapshot.json
 # ---- 编辑器 / 系统 ----
 .DS_Store
 Thumbs.db
+kb_dirs.txt

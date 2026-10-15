@@ -266,16 +266,19 @@ def fmt_ts(ts: int | None) -> str:
 
 # ------- Flask app -------
 
-def _kb_doc_count(group_name: str) -> int:
+def _kb_doc_count(group_name: str, kb_dir: str = "") -> int:
     """该群已蒸馏的资料份数（读知识库台账；失败就返回 0，页面照常渲染）。
 
     监控页用它显示"已蒸馏 N 份资料"，让用户一眼看出这个群有没有料。
+    ⚠️ 必须把该群的 `kb_dir` 一起传进来：多个群可能通过 `kb.root` 映射
+    **共享同一套笔记**，只按群名找会数成 0（2026-10-15 自检时踩到）。
     只读、失败静默 —— 不能让台账问题把监控页搞崩（这是页面渲染路径上的调用）。
     """
     try:
         import consumer.kb_notes as _kbn
         import paths as _paths
-        entries = _kbn.load_sources(_kbn.kb_root(_paths.data_root(), group_name))
+        entries = _kbn.load_sources(
+            _kbn.kb_root(_paths.data_root(), group_name, kb_dir or None))
         return sum(1 for e in entries.values() if e.note_file)
     except Exception:  # noqa: BLE001
         return 0
@@ -340,7 +343,7 @@ def _config_context() -> dict:
             "kb_at": str(ent.get("kb_at") or ""),
             "kb_dir": str(ent.get("kb_dir") or ""),
             # 已蒸馏资料份数（从台账数出来，让页面能看出"这个群有没有料"）
-            "kb_docs": _kb_doc_count(str(ent.get("name") or gid)),
+            "kb_docs": _kb_doc_count(str(ent.get("name") or gid), str(ent.get("kb_dir") or "")),
         })
     sender_rows = [{"id": s, "name": disp("senders", s)} for s in mon_senders]
 

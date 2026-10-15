@@ -121,9 +121,9 @@ class NoteSection:
 _H2 = re.compile(r"^##\s+(.+?)\s*$", re.M)
 
 
-def load_sections(group: str, data_root: Path) -> list[NoteSection]:
-    """把该群所有笔记切成 `## 主题` 段。"""
-    root = kb_root(data_root, group)
+def load_sections(group: str, data_root: Path, kb_dir: str | None = None) -> list[NoteSection]:
+    """把该群所有笔记切成 `## 主题` 段（`kb_dir` 用于解析 `kb.root` 共享笔记）。"""
+    root = kb_root(data_root, group, kb_dir)
     entries = load_sources(root)
     out: list[NoteSection] = []
     for rel, ent in entries.items():
@@ -272,10 +272,14 @@ def _context_block(hits: list[Hit]) -> str:
 def answer_question(question: str, group: str, data_root: Path, *,
                     top_k: int = DEFAULT_TOP_K, llm: dict | None = None,
                     self_check: bool = True, disclaimer: str = DISCLAIMER,
+                    kb_dir: str | None = None,
                     verbose: bool = False, timeout_s: float = 120.0) -> AnswerResult:
-    """用知识库回答问题（**不发送**，只返回结果）。"""
+    """用知识库回答问题（**不发送**，只返回结果）。
+
+    `kb_dir`：该群的资料目录（用于 `kb.root` 映射，让多群共享同一套笔记）。
+    """
     res = AnswerResult(question=question, group=group)
-    sections = load_sections(group, data_root)
+    sections = load_sections(group, data_root, kb_dir)
     if not sections:
         res.answer = "资料库为空（还没蒸馏过资料），建议先导入资料。"
         res.from_kb = False

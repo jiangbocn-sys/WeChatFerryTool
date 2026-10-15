@@ -94,6 +94,8 @@ class ReplyConfig:
     kb_trigger_by_group: dict[str, str] = field(default_factory=dict)
     #: 群 → 是否开启知识库问答（`labels.groups.<gid>.kb_on`）
     kb_on_by_group: dict[str, bool] = field(default_factory=dict)
+    #: 群 → 资料目录（`labels.groups.<gid>.kb_dir`）。用于解析 `kb.root` 共享笔记。
+    kb_dir_by_group: dict[str, str] = field(default_factory=dict)
 
 
 class Replier:
@@ -220,6 +222,12 @@ class Replier:
         self.cfg.kb_on_by_group = {
             str(g): bool((v or {}).get("kb_on"))
             for g, v in groups.items() if (v or {}).get("kb_on")
+        }
+        # 资料目录也要带上：多群可能通过 `kb.root` 映射共享同一套笔记，
+        # 只按群名找笔记会"查无资料"（2026-10-15 踩到）。
+        self.cfg.kb_dir_by_group = {
+            str(g): str((v or {}).get("kb_dir") or "").strip()
+            for g, v in groups.items() if str((v or {}).get("kb_dir") or "").strip()
         }
 
     def _resolve_at(self, sender_wxid: str) -> str:
@@ -712,6 +720,7 @@ class Replier:
             res = self._kb_ask(question, group_name, data_root,
                                top_k=self.cfg.kb.top_k,
                                self_check=self.cfg.kb.self_check,
+                               kb_dir=self.cfg.kb_dir_by_group.get(group_name) or None,
                                disclaimer=self.cfg.kb.disclaimer)
         except Exception as e:  # noqa: BLE001
             log.error("知识库回答失败（不发兜底噪音）：群=%s 问题=%s err=%s",
