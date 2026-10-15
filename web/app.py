@@ -2549,6 +2549,59 @@ def create_app() -> Flask:
             abort(404)
         return p
 
+    @app.route("/kb/distill/<gid>", methods=["POST"])
+    def kb_distill_group(gid: str):
+        """对某个监控群做「检查资料更新并增量蒸馏」。
+
+        两段式（防止误点就花钱）：
+          * 不带 `confirm=1` → **预演**：只报告"会蒸几个文件、预计几次调用"，不调 LLM；
+          * 带 `confirm=1` → 真跑（只蒸新增/修改过的文件）。
+        """
+        import json as _json
+        import paths as _paths
+        from consumer import kb_notes as _kbn
+        lab_path = _paths.data_root() / "data" / "labels.json"
+        ent = {}
+        try:
+            lab = _json.loads(lab_path.read_text(encoding="utf-8"))
+            ent = (lab.get("groups") or {}).get(gid) or {}
+        except (OSError, _json.JSONDecodeError):
+            ent = {}
+        gname = str(ent.get("name") or gid)
+        kdir = str(ent.get("kb_dir") or "")
+        if not kdir:
+            return redirect(url_for("filter_page",
+                                    error=f"{gname} 还没填资料目录，先填好再蒸馏"))
+        import os as _os
+        if not _os.path.isdir(kdir):
+            return redirect(url_for("filter_page",
+                                    error=f"资料目录不存在：{kdir}"))
+        confirm = request.form.get("confirm") == "1" or request.args.get("confirm") == "1"
+        import consumer.summarize as _sm      # 局部导入：本模块的惯例（见 /digest 路由）
+        try:
+            if not confirm:
+                rep = _kbn.distill_group(Path(kdir), gname, _paths.data_root(),
+                                         {}, dry_run=True)
+                msg = (f"{gname} 预演：新增 {len(rep.new)}、更新 {len(rep.updated)}、"
+                       f"未变化 {len(rep.unchanged)}；预计调用 LLM {rep.plan_calls} 次"
+                       f"（确认后再次点击才会真正蒸馏）")
+                return redirect(url_for("filter_page", saved=msg))
+            if not _sm.llm_ready():
+                return redirect(url_for("filter_page",
+                                        error="没配好大模型（设置页填 base_url 与模型名）"))
+            rep = _kbn.distill_group(Path(kdir), gname, _paths.data_root(),
+                                     _sm._llm_cfg(), dry_run=False)
+            msg = (f"{gname} 蒸馏完成：新增 {len(rep.new)}、更新 {len(rep.updated)}、"
+                   f"未变化 {len(rep.unchanged)}、失败 {len(rep.failed)}；"
+                   f"调用 LLM {rep.llm_calls} 次，写出笔记 {rep.notes_written} 份")
+            if rep.failed:
+                msg += "；失败：" + "；".join(f"{r}:{w}" for r, w in rep.failed[:3])
+            return redirect(url_for("filter_page", saved=msg))
+        except Exception as e:  # noqa: BLE001
+            log.exception("知识库蒸馏失败")
+            return redirect(url_for("filter_page",
+                                    error=f"蒸馏失败：{type(e).__name__}: {e}"))
+
     @app.route("/digest")
     def digest_page():
         cfg = load_config()

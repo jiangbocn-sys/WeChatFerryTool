@@ -294,6 +294,17 @@ class Consumer:
                      self.digest_time, self.digest_out_dir,
                      "自动总结" if self.digest_summarize else "不自动总结")
 
+        # 知识库：定时**增量**蒸馏（只蒸新增/修改过的资料；没变化不花额度）
+        _kb_cfg = ((cfg.get("replies") or {}).get("kb") or {})
+        self.kb_auto_time = _norm_hhmm(str((cfg.get("kb") or {}).get("auto_distill_time") or ""),
+                                       default="")
+        if _kb_cfg.get("enabled") and self.kb_auto_time:
+            threading.Thread(target=self._kb_distill_loop, name="kb-distill",
+                             daemon=True).start()
+            log.info("📚 知识库定时增量蒸馏已启用：每天 %s 检查资料更新", self.kb_auto_time)
+        elif _kb_cfg.get("enabled"):
+            log.info("📚 知识库定时蒸馏：未启用（设置页 kb.auto_distill_time 留空时为手动蒸馏）")
+
         # 消息库按期清理（需求 R-001）：后台静默、一天最多一次、分批可中断
         from consumer.cleanup import MIN_RETENTION_DAYS, read_storage_cfg
         _cl = read_storage_cfg(cfg)
@@ -424,6 +435,68 @@ class Consumer:
             anchor = anchor - timedelta(days=1)
         start = anchor - timedelta(days=1)
         return int(start.timestamp()), int(anchor.timestamp()), anchor.strftime("%Y-%m-%d")
+
+    def _kb_distill_loop(self) -> None:
+        """每天到点检查各群资料目录，**只蒸新增/修改过的文件**（没变化不花额度）。
+
+        为什么要有它：资料是不断加的（用户会往里放新 PDF/docx）。
+        没有定时检查，就只能靠人记得手动点一次 —— 那样知识库会悄悄落后。
+        """
+        state_path = PROJECT_DIR / "data" / "kb_distill_state.json"
+        while not self._stop:
+            try:
+                now = datetime.now()
+                today = now.strftime("%Y-%m-%d")
+                last = ""
+                try:
+                    last = str((json.loads(state_path.read_text(encoding="utf-8"))
+                                or {}).get("last_date") or "")
+                except (OSError, json.JSONDecodeError):
+                    last = ""
+                due = now.strftime("%H:%M") >= self.kb_auto_time and last != today
+                if due:
+                    self._kb_distill_once()
+                    state_path.parent.mkdir(parents=True, exist_ok=True)
+                    state_path.write_text(
+                        json.dumps({"last_date": today,
+                                    "at": now.strftime("%Y-%m-%d %H:%M:%S")},
+                                   ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                log.exception("知识库定时蒸馏异常（不影响其它功能）")
+            for _ in range(30):
+                if self._stop:
+                    return
+                time.sleep(1)
+
+    def _kb_distill_once(self) -> None:
+        """对"开了知识库问答且填了资料目录"的群跑一轮增量蒸馏。"""
+        try:
+            from consumer import kb_notes as _kbn
+            from consumer import summarize as _sm
+            if not _sm.llm_ready():
+                log.warning("知识库定时蒸馏跳过：没配好大模型")
+                return
+            import paths as _paths
+            dr = _paths.data_root()
+            llm = _sm._llm_cfg()
+            targets = []
+            for gid, v in (self.labels.get("groups") or {}).items():
+                v = v or {}
+                if v.get("kb_on") and str(v.get("kb_dir") or "").strip():
+                    targets.append((str(v.get("name") or gid), str(v["kb_dir"])))
+            for gname, kdir in targets:
+                try:
+                    rep = _kbn.distill_group(Path(kdir), gname, dr, llm, dry_run=False)
+                    if rep.changed or rep.failed:
+                        log.info("📚 知识库增量蒸馏[%s]：新增 %d 更新 %d 失败 %d，调用 %d 次",
+                                 gname, len(rep.new), len(rep.updated),
+                                 len(rep.failed), rep.llm_calls)
+                    else:
+                        log.info("📚 知识库[%s]：资料无变化（未调用大模型）", gname)
+                except Exception:  # noqa: BLE001
+                    log.exception("知识库蒸馏失败：%s", gname)
+        except Exception:  # noqa: BLE001
+            log.exception("知识库定时蒸馏整体失败")
 
     def _digest_loop(self) -> None:
         """后台线程：每天到点生成重点发言归档（状态持久化，防重启重复生成）。"""

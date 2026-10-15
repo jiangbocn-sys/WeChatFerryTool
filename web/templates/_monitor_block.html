@@ -92,6 +92,16 @@
                 <input type="text" name="kb_dir_{{ g.id }}" value="{{ g.kb_dir or '' }}"
                        placeholder="资料目录，如 D:\JiangBo\Documents\wechatdocs\弟子群"
                        style="width:100%; font-size:11px; padding:2px 4px; margin-top:3px">
+                {# 该群的增量蒸馏按钮：只蒸**新增/修改过**的文件（没变化不花额度）。
+                   用 formaction 走单独路由，避免和"保存"混在一个 action 里。 #}
+                {% if g.kb_dir %}
+                <button type="submit" class="secondary"
+                        formaction="{{ url_for('kb_distill_group', gid=g.id) }}"
+                        style="margin-top:3px; font-size:11px; padding:2px 8px"
+                        title="只蒸新增/修改过的文件；预演不花钱，确认后才调用大模型">
+                    📥 检查资料更新并蒸馏
+                </button>
+                {% endif %}
                 {% if g.kb_on %}
                 <div class="hint" style="margin:2px 0 0; color:#c0392b">
                     已开启（总闸见设置页「📚 群知识库问答」）
