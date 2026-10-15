@@ -356,12 +356,15 @@ class Consumer:
         _kb = self.replier.cfg.kb
         if _kb.enabled:
             _on = sorted(self.replier.cfg.kb_on_by_group.keys())
+            _gate = "" if self.replier.cfg.enabled else \
+                "⚠️ 但自动回复总闸是**关**的 → 知识库当前也不会回答" \
+                "（用托盘「自动回复」或 --replies 开启）"
             log.warning(
-                "📚 群知识库问答已启用：%d 个群（%s）｜每群冷却 %ds、延迟 %d~%ds、"
-                "队列上限 %d、%s",
+                "📚 群知识库问答已配置：%d 个群（%s）｜每群冷却 %ds、延迟 %d~%ds、"
+                "队列上限 %d、%s %s",
                 len(_on), "、".join(_on) or "（没有群配 kb_on）",
                 _kb.cooldown_s, _kb.delay_min_s, _kb.delay_max_s, _kb.max_queue,
-                "**测试模式（只记日志不发送）**" if _kb.test_only else "真实发送",
+                "**测试模式（只记日志不发送）**" if _kb.test_only else "真实发送", _gate,
             )
         else:
             log.info("群知识库问答：未启用（replies.kb.enabled / 群 kb_on）")
@@ -1263,27 +1266,29 @@ class Consumer:
             #    _in_digest 的敏感关键词命中）。老行为是"名单外的群连库都进不去"，
             #    导致 9:47 那种"明明在微信里有、系统里查无此条"的困惑（10-07 踩到）。
 
-            # 1.5 自动回复 / 群知识库问答（只对"别人发来的"消息触发；自己发的不触发）
-            #     注意：回复的生效范围由**模板自己的 scope** 决定（replier._match_scope），
-            #     与上面的入库范围无关 —— 入库放开不会让回复变宽。
-            #
-            #     知识库**先**判：它以「@<虚拟号>」开头为触发条件，
-            #     命中就"接管"这条消息，不再走模板匹配（避免同一句话被答两次）。
-            if not is_self:
+            # 1.5 自动回复 / 群知识库问答
+            #     自动回复（模板）：**只对别人发来的**消息触发（防自问自答）。
+            #     知识库问答：**自己发的也允许**（默认）—— 它必须显式 `@<虚拟号>` 开头，
+            #       是"人主动问助教"，不存在刷屏风险；而且实测用户就是用自己的号
+            #       在群里 @小易 测试的（2026-10-15 踩到：被 `if not is_self` 整段跳过，
+            #       表现为"@了完全没反应"）。
+            #       可用 `replies.kb.allow_self: false` 关掉这一条。
+            #     知识库**先**判：命中就"接管"，不再走模板匹配（避免同一句被答两次）。
+            try:
+                took = self.replier.maybe_reply_kb(
+                    group_name=group_name, sender=sender, content=content,
+                    is_self=is_self,
+                )
+            except Exception:  # noqa: BLE001
+                took = False
+                log.exception("知识库问答处理异常")
+            if not took and not is_self:
                 try:
-                    took = self.replier.maybe_reply_kb(
+                    self.replier.maybe_reply(
                         group_name=group_name, sender=sender, content=content,
                     )
                 except Exception:  # noqa: BLE001
-                    took = False
-                    log.exception("知识库问答处理异常")
-                if not took:
-                    try:
-                        self.replier.maybe_reply(
-                            group_name=group_name, sender=sender, content=content,
-                        )
-                    except Exception:  # noqa: BLE001
-                        log.exception("replier 处理异常")
+                    log.exception("replier 处理异常")
 
             # 2. 计算 priority（命中重点关注群/联系人 → priority=1）
             priority, prio_reason = self._compute_priority(group_name, sender)

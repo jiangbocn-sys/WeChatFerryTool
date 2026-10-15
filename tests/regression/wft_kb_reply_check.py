@@ -103,13 +103,29 @@ check("没有 @ → 不接管",
 check("**只 @ 不说话 → 不接管**（空问题）",
       r.maybe_reply_kb(group_name=G1, sender="w1", content="@小易") is False)
 
-print("\n[B] 按群开关：总闸 + kb_on 都要开")
+print("\n[B] 三道闸都要开：自动回复总闸 + 知识库总闸 + 群勾选")
 r2, _ = make()
 check("丙群 kb_on=false → 不接管",
       r2.maybe_reply_kb(group_name=G3, sender="w1", content="@小易 三合局") is False)
 r3, _ = make(enabled=False)
-check("总闸关 → 所有群都不接管",
+check("知识库总闸关 → 不接管",
       r3.maybe_reply_kb(group_name=G1, sender="w1", content="@小易 三合局") is False)
+# ⚠️ **自动回复总闸**（app 启动默认强制关闭它）也必须拦住知识库：
+#    否则页面显示"自动回复:关"，知识库却还在群里真实发言 —— 迟早出事（2026-10-15 修）。
+r3b, hook3b = make(test_only=False)
+r3b.cfg.enabled = False                      # 模拟 app 的"默认强制关闭"
+check("**自动回复总闸关 → 知识库也不接管**（与 app 默认静默策略一致）",
+      r3b.maybe_reply_kb(group_name=G1, sender="w1", content="@小易 三合局") is False)
+check("上一条确认没有真的发出去", hook3b.sent == [], str(hook3b.sent))
+r3c, _ = make(test_only=False)
+r3c.cfg.enabled = True                       # 托盘/--replies 打开后才生效
+check("总闸打开后知识库恢复接管",
+      r3c.maybe_reply_kb(group_name=G1, sender="w1", content="@小易 三合局") is True)
+check("kb_enabled_for 逐闸验证：群勾选",
+      r3c.kb_enabled_for(G1) is True and r3c.kb_enabled_for(G3) is False)
+r3d, _ = make(enabled=False)
+r3d.cfg.enabled = True
+check("kb_enabled_for：知识库总闸关则不生效", r3d.kb_enabled_for(G1) is False)
 
 print("\n[C] 测试模式：接管但不发送")
 r4, hook4 = make(test_only=True)
@@ -254,6 +270,41 @@ _r3 = _c.post("/config/filter/save", data={
 check("资料目录不存在时给出提示（不静默）",
       "error=" in (_r3.headers.get("Location") or ""), "")
 check("设置页说明回答限定资料内", "不编造" in _cfg_html or "资料中未涉及" in _cfg_html)
+
+print("\n[L] 自己发的消息也能触发（用户实测场景：用自己的号在群里 @小易）")
+# 2026-10-15 真实故障：用户在**自己号所在的群** @小易 完全没反应。
+# 原因：知识库被嵌在 `if not is_self:` 里 —— 自己发的消息 sender==self_wxid → 整段跳过。
+# 修法：知识库默认**允许**自发消息触发（它必须显式 @虚拟号，不是泛匹配）；
+#       自动回复模板仍不对自发消息生效（保持原设计）。
+r12, hook12 = make(test_only=False)
+_took_self = r12.maybe_reply_kb(group_name=G1, sender="me", content="@小易 三合局条件",
+                                is_self=True)
+check("**自己发的 @小易 也会被接管**（修掉「@了没反应」）", _took_self is True)
+r13, _ = make(test_only=False, allow_self=False)
+check("allow_self=false 可关掉（保守配置）",
+      r13.maybe_reply_kb(group_name=G1, sender="me", content="@小易 三合局",
+                         is_self=True) is False)
+r14, _ = make(test_only=False)
+check("别人发的仍正常接管",
+      r14.maybe_reply_kb(group_name=G1, sender="w9", content="@小易 三合局",
+                         is_self=False) is True)
+check("自己发但没 @ → 不接管",
+      r14.maybe_reply_kb(group_name=G1, sender="me", content="随便聊聊",
+                         is_self=True) is False)
+# 诊断日志：@ 了但没匹配上时要留线索（否则只能靠猜）
+_diag_r, _ = make()
+import logging as _lg  # noqa: E402
+import io as _io  # noqa: E402
+_buf = _io.StringIO()
+_h = _lg.StreamHandler(_buf)
+_lg.getLogger("consumer.replier").addHandler(_h)
+_lg.getLogger("consumer.replier").setLevel(_lg.INFO)
+_diag_r.maybe_reply_kb(group_name=G1, sender="w1", content="大家说@小易 是啥意思")
+_diag_r.maybe_reply_kb(group_name=G1, sender="w1", content="@小易")
+_log_txt = _buf.getvalue()
+check("**未触发时留诊断日志**（@ 了却没匹配上）",
+      "知识库未触发" in _log_txt, _log_txt.strip()[:80])
+check("不相关消息不产生诊断噪音", _log_txt.count("知识库未触发") >= 1)
 
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)

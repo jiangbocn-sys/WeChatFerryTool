@@ -76,6 +76,12 @@ class KbConfig:
     self_check: bool = True           # 回答后做第二遍自检
     top_k: int = 5                    # 检索片段数
     test_only: bool = True            # 只记日志不发（默认开）
+    #: 是否允许**自己发**的消息触发（默认 True）。
+    #: 为什么默认允许：知识库必须**显式** `@虚拟号` 开头才命中（不是泛匹配），
+    #: 不存在"自问自答刷屏"的风险；而实测中用户就是**用自己的号在群里 @小易 测试**
+    #: （2026-10-15 踩到：那条消息 `sender=本人` → 被 `if not is_self` 整段跳过，
+    #: 表现为"@了完全没反应"）。自动回复模板仍**不**对自发消息生效（保持原样）。
+    allow_self: bool = True
     disclaimer: str = "（据资料整理，如有出入以老师讲解为准）"
 
 
@@ -196,6 +202,7 @@ class Replier:
             self_check=bool(kr.get("self_check", True)),
             top_k=int(kr.get("top_k", 5)),
             test_only=bool(kr.get("test_only", True)),
+            allow_self=bool(kr.get("allow_self", True)),
             disclaimer=str(kr.get("disclaimer")
                            or "（据资料整理，如有出入以老师讲解为准）"),
         )
@@ -589,18 +596,35 @@ class Replier:
     def kb_enabled_for(self, group_name: str) -> bool:
         """该群是否开了知识库问答。
 
-        总闸 `replies.kb.enabled` **与该群的 `kb_on` 都要开**才算开 ——
-        避免"总闸一开所有群都被答"。
+        **三道闸都要开**（2026-10-15 修）：
+          1. `replies.enabled` —— 自动回复总开关。app 启动时**默认强制关闭**它
+             （`app/main.py` 的"默认策略"，托盘菜单可开）。
+             知识库**必须尊重同一个闸**：否则页面显示"自动回复:关"，
+             知识库却还在群里真实发言 —— 这种不一致迟早出事。
+          2. `replies.kb.enabled` —— 知识库总闸。
+          3. 该群的 `kb_on` —— 按群开关。
+
+        全开才算开：避免"总闸一开所有群都被答"，也避免绕过 app 的默认静默策略。
         """
+        if not self.cfg.enabled:
+            return False
         if not self.cfg.kb.enabled:
             return False
         return bool(self.cfg.kb_on_by_group.get(group_name))
 
-    def maybe_reply_kb(self, *, group_name: str, sender: str, content: str) -> bool:
+    def maybe_reply_kb(self, *, group_name: str, sender: str, content: str,
+                       is_self: bool = False) -> bool:
         """知识库问答入口。返回 True 表示**已接管**这条消息（调用方就不用再走模板匹配）。
 
         流程：触发匹配 → 去重 → 限速判定 → 直接答 or 排队。
+
+        `is_self=True`（自己发的消息）：默认**也允许触发**，因为知识库要求
+        显式 `@虚拟号` 开头 —— 这是"人主动问助教"，不是自问自答刷屏。
+        实测用户就是用自己的号在群里 @小易 测试的（2026-10-15）。
+        可用 `replies.kb.allow_self: false` 关掉。
         """
+        if is_self and not self.cfg.kb.allow_self:
+            return False
         if not self.kb_enabled_for(group_name):
             return False
         name = self.kb_trigger_name(group_name)
@@ -611,7 +635,15 @@ class Replier:
             return False
         q = strip_trigger(content, name)
         if q is None:
-            return False                      # 不是 @<虚拟号> 开头 → 不接管
+            # ⚠️ 诊断日志（2026-10-15 加）：**只在看起来像想触发、但没匹配上时**记一条，
+            #    否则群消息量大会刷屏。排查"@了却没反应"时这条是关键线索 ——
+            #    能看到"名字对不对、是不是没在开头、是不是只 @ 没说话"。
+            if content.lstrip().startswith("@") or ("@" + name) in content:
+                log.info("知识库未触发：群=%s 期望前缀=@%s 实际=%r（原因：%s）",
+                         group_name, name, content[:60],
+                         "不在消息开头" if ("@" + name) in content
+                         else "名字不匹配或只是@没说内容")
+            return False
         # 去重：同群、同人、相似问题，在一个窗口内只答一次
         fp = self._kb_fp(q)
         now = time.time()

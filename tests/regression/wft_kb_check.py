@@ -209,6 +209,46 @@ check("com 分派存在（.doc/.ppt 走 Office）",
 check("默认格式含用户要求的 md/txt/ppt/pptx",
       {".md", ".txt", ".pptx", ".ppt"} <= set(K.DEFAULT_EXT), str(K.DEFAULT_EXT))
 
+print("\n[I] 知识库相关源码语法防线（全角引号陷阱）")
+# 背景：本项目**反复**踩到「在 Python 字符串字面量里写中文全角引号 `"…"`」→ SyntaxError。
+# 本次会话就踩了 5 次（改 kb_answer / app.py / 测试时各中招），每次都要等运行才暴露。
+# 这里用 `compile()` 逐个预检（**不是 ast.parse** —— ast.parse 会把带 BOM 的文件误报成
+# "invalid non-printable character U+FEFF"，而那些文件实际能正常执行）。
+import py_compile  # noqa: E402
+import tempfile as _tf  # noqa: E402
+
+_kb_sources = [
+    PROJ / "consumer" / "kb_extract.py",
+    PROJ / "consumer" / "kb_notes.py",
+    PROJ / "consumer" / "kb_answer.py",
+    PROJ / "consumer" / "replier.py",
+    PROJ / "consumer" / "main.py",
+    PROJ / "web" / "app.py",
+    PROJ / "app" / "main.py",
+    PROJ / "tools" / "kb.py",
+    PROJ / "tests" / "regression" / "wft_kb_check.py",
+    PROJ / "tests" / "regression" / "wft_kb_answer_check.py",
+    PROJ / "tests" / "regression" / "wft_kb_reply_check.py",
+]
+_bad: list[str] = []
+for _p in _kb_sources:
+    if not _p.is_file():
+        _bad.append(f"{_p.name}(缺失)")
+        continue
+    try:
+        compile(_p.read_text(encoding="utf-8-sig"), str(_p), "exec")
+    except SyntaxError as _e:
+        _bad.append(f"{_p.name}:{_e.lineno} {str(_e)[:50]}")
+check("**知识库相关源码全部语法正确**（含全角引号陷阱）", not _bad, "; ".join(_bad))
+# 全角引号检测：写在字符串里的 `"` / `"` 是 SyntaxError 的高频来源，
+# 但出现在中文注释/文档字符串里是合法的 —— 只提示，不当失败。
+_qq = 0
+for _p in _kb_sources:
+    if _p.is_file():
+        _t = _p.read_text(encoding="utf-8-sig")
+        _qq += _t.count("\u201c") + _t.count("\u201d")
+check("全角引号仅出现在注释/文档里（数量记录，便于排查）", True, f"{_qq} 处")
+
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)
 if FAILS:
