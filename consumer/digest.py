@@ -316,6 +316,82 @@ def revoked_originals(revoke_rows: list, db_file: Path | None = None) -> dict[st
     return out
 
 
+def replace_reminder(text: str, want: str) -> str:
+    """把文本里的语音提醒行**规范成程序生成的 `want`**；没有就补在最后一行。
+
+    为什么要"规范化"而不是"有就不动"：模型自己写的那一行格式经常不一致
+    （时间列表被省略、条数写成"多条"、少了"请回群自行查看"等）。既然时间与条数
+    是机器提取的事实，就统一用程序版本 —— 这样**归档稿与发进群稿的提醒行完全一致**。
+    """
+    if not want:
+        return text or ""
+    import re as _re
+    # 与 group_summary.REMINDER_RE 同口径的宽容匹配：只要以「提醒：本时段」开头就算那一行。
+    # ⚠️ 用 `sub` 的 count=1 **不够**：模型可能把清单拆成多条碎片提醒行
+    #    （实测丙午群那份被写成 10 条，每条只写一段）→ 必须把**所有**这类行
+    #    合并替换成唯一的那一条，否则正文里会堆一堆重复提醒。
+    pat = _re.compile(r"^[ \t]*[-*]?[ \t]*提醒：本时段[^\n]*$", _re.M)
+    body = (text or "").rstrip()
+    if pat.search(body):
+        return pat.sub(want, body)          # 全部合并成一条（sub 默认 replace all）
+    return (body + "\n\n" + want) if body else want
+
+
+def reminder_line(rows: list, labels: dict) -> str:
+    """生成**可以直接放进总结的「语音提醒行」**（单行，`- 提醒：…`）。
+
+    与 `starred_voice_note()`（给模型的清单）区别：那个是多行清单、只喂 prompt；
+    这个是**成品提醒行**，用于：
+      1. prompt 里给模型照抄的**确切文本**；
+      2. **程序兜底** —— 模型没写时直接补进总结（见 `summarize._ensure_reminder_in_summary`）。
+
+    连续语音合并成"HH:MM 起（N 条）"，间隔 ≤120 秒算同一串；只列时间与条数，不编内容。
+    """
+    if not rows or not labels:
+        return ""
+    focus_by_group: dict[str, set] = {}
+    for gid, ent in (labels.get("groups") or {}).items():
+        f = (ent or {}).get("focus_members") or []
+        if f:
+            focus_by_group[str(gid)] = {str(x) for x in f}
+    if not focus_by_group:
+        return ""
+    from collections import defaultdict
+    seqs: dict[str, list[int]] = defaultdict(list)
+    for r in rows:
+        try:
+            if int(r["msg_type"] or 0) != 34:
+                continue
+            gid = str(r["group_name"] or "")
+            snd = str(r["sender"] or "")
+            if snd not in focus_by_group.get(gid, ()):
+                continue
+            ts = int(r["received_at"] or 0)
+            if ts:
+                seqs[snd].append(ts)
+        except Exception:  # noqa: BLE001
+            continue
+    if not seqs:
+        return ""
+    parts: list[str] = []
+    for snd, tss in sorted(seqs.items(), key=lambda kv: min(kv[1])):
+        tss.sort()
+        merged: list[list[int]] = []
+        for ts in tss:
+            if merged and ts - merged[-1][-1] <= 120:
+                merged[-1].append(ts)
+            else:
+                merged.append([ts])
+        stamps = []
+        for gp in merged:
+            a = datetime.fromtimestamp(gp[0]).strftime("%H:%M")
+            stamps.append(f"{a} 起发了 {len(gp)} 条语音" if len(gp) > 1
+                          else f"{a} 发了 1 条语音")
+        sname = (((labels.get("senders") or {}).get(snd) or {}).get("name")) or snd
+        parts.append(f"★{sname} 于 " + "、".join(stamps))
+    return ("- 提醒：本时段 " + "；".join(parts) + "（内容未获取），请回群自行查看")
+
+
 def starred_voice_note(rows: list, labels: dict) -> str:
     """列出**加星（★重点）成员**发语音的**发送时间**，让总结能确定性带上它（2026-10-13）。
 

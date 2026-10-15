@@ -42,6 +42,8 @@ from consumer.digest import (  # noqa: E402
     _render_content,
     _summary_hint,
     starred_voice_note,
+    reminder_line,
+    replace_reminder,
 )
 from paths import data_root  # noqa: E402
 
@@ -553,10 +555,16 @@ def build_prompt(date_str: str, grouped: dict[str, list[str]],
     # 加星成员语音时间清单（确定性，不依赖模型自己发现）。
     # ⚠️ 必须独立成段并**显式要求写进总结**：这些语音**内容未获取**（PC 微信不落盘音频），
     #    读者只有靠这条提醒才知道"群里还有重要语音，得自己回去看"（2026-10-13 用户要求）。
+    # ⚠️ **清单也要按群过滤**（2026-10-15 踩到）：原来喂的是全部会话的行，
+    #    丙午群的 prompt 里因此出现了岳章群 ★可贞 的 41 条语音，模型照抄进了总结。
     voice_note = ""
     if rows:
         try:
-            voice_note = starred_voice_note(rows, labels)
+            if gid:
+                _fixed = [r for r in rows if str(r["group_name"] or "") == str(gid)]
+            else:
+                _fixed = list(rows)
+            voice_note = starred_voice_note(_fixed, labels) if _fixed else ""
         except Exception:  # noqa: BLE001
             voice_note = ""
     # 注意用 replace 而不是 str.format：body 里含 `{`／`}`（XML/JSON 片段）会炸 format
@@ -567,14 +575,38 @@ def build_prompt(date_str: str, grouped: dict[str, list[str]],
     if voice_note:
         # ⚠️ 必须插在"请开始总结"这句**之前**：放在其后会让模型以为清单是补充说明而忽略
         #    （2026-10-13 实测：清单落在收尾指令之后，位置很像"附录"）。
+        #
+        # ⚠️ 关键改进（2026-10-15）：**把提醒行的确切文本给出来让模型照抄**。
+        #    原来只描述格式（`提醒：本时段 ★某某 于 HH:MM 起发了 N 条语音…`），
+        #    模型经常不写或写歪（该群 prompt 里明明有 ★周少彬 4 条语音，总结里却没有提醒行）。
+        #    现在直接给成品行；而且**即使模型仍不写，也会由程序兜底补进去**
+        #    （见 `_ensure_reminder_in_summary`），所以这一行是"必然存在"的。
+        exact = ""
+        try:
+            # ⚠️ 必须**按本群过滤**（2026-10-15 踩到）：原来直接用全部会话的 rows，
+            # 于是丙午群的 prompt 里被塞进了岳章群 ★可贞 的语音清单，
+            # 模型照抄进总结 → "可贞并没有在丙午群发语音"却出现在丙午群里。
+            # 没有 gid（合并模式）时才用全部行。
+            if gid:
+                fixed = [r for r in rows if str(r["group_name"] or "") == str(gid)]
+                exact = reminder_line(fixed, labels) if fixed else ""
+            else:
+                exact = reminder_line(rows, labels)
+        except Exception:  # noqa: BLE001
+            exact = ""
         tail = "请开始总结（只输出总结内容，不要重复贴回原文）："
+        if exact:
+            how = ("因此请在总结**最后单独加一行**，内容就是下面这一行"
+                   "（**原文照抄，不要改写、不要合并到别的条目里**）：\n"
+                   f"`{exact}`\n")
+        else:
+            how = ("因此请在总结**最后单独加一行**（原文照抄格式，人名与时间用清单里的）：\n"
+                   "`提醒：本时段 ★某某 于 HH:MM 起发了 N 条语音（内容未获取），请回群自行查看`\n")
         add = (voice_note +
                "\n**关于上面这段语音清单的处理要求（重要）**：这些语音的**内容我们没有拿到**"
                "（转写缺失），所以正文里无从引用；但**读者需要知道「群里还有这些语音，"
-               "值得自己回去听」**。"
-               "因此请在总结**最后单独加一行**（原文照抄格式，人名与时间用清单里的）：\n"
-               "`提醒：本时段 ★某某 于 HH:MM 起发了 N 条语音（内容未获取），请回群自行查看`\n"
-               "有多位加星成员时，一行里用「、」并列；没有任何加星成员语音时**不要写这一行**。\n\n")
+               "值得自己回去听」**。" + how +
+               "没有任何加星成员语音时**不要写这一行**。\n\n")
         if tail in out:
             out = out.replace(tail, add + tail, 1)
         else:
@@ -789,6 +821,54 @@ def llm_ready() -> bool:
     return bool(str(cfg.get("base_url") or "").strip() and str(cfg.get("model") or "").strip())
 
 
+def _ensure_reminder_in_summary(summary: str, gid: str, gname: str,
+                                rows: list, labels: dict) -> str:
+    """**程序保证**总结正文里有加星成员的「语音提醒行」。
+
+    2026-10-15 实测：prompt 里已经给了清单（可贞 41 条 + 周少彬 4 条），
+    但「易青岚乙巳年弟子群」这次模型**就是没写**提醒行，于是归档稿没有、
+    下一层"提炼"自然也无从保留（上一轮只给提炼加了兜底，不够）。
+
+    现在按事实兜底：**该群**只要有加星语音而正文里找不到提醒行，就程序补在最后一行。
+    ⚠️ **严格按 `gid` 过滤**：任何情况下都不得用别的会话的行来生成提醒
+    （曾经写成 `fixed or rows`，导致岳章形家风水班的 ★可贞 串进了乙巳年弟子群的总结）。
+    """
+    try:
+        from consumer.group_summary import extract_reminder
+    except Exception:  # noqa: BLE001
+        return summary
+    if extract_reminder(summary):
+        # 模型写了，但格式常与程序版本不一致（省时间、写"多条"、漏"请回群自行查看"）
+        # → **规范成同一份程序生成文本**，保证归档稿与发进群稿一致。
+        try:
+            fixed = [r for r in rows if str(r["group_name"] or "") == str(gid)]
+            want_n = reminder_line(fixed, labels) if fixed else ""
+            if want_n:
+                return replace_reminder(summary, want_n)
+        except Exception:  # noqa: BLE001
+            pass
+        return summary
+    try:
+        # ⚠️ **绝不能回退到"全部会话的行"**（2026-10-15 踩到）：
+        # 原来写的是 `fixed or rows`，某群过滤后为空时就退回全部行，
+        # 于是**别的群**的加星语音提醒串进了这个群的总结
+        # （用户报："可贞并没有在乙巳年弟子群中发语音"）。
+        # 群内没有加星语音 → 这个群就没有提醒行，天经地义。
+        if not gid:
+            return summary
+        fixed = [r for r in rows if str(r["group_name"] or "") == str(gid)]
+        if not fixed:
+            return summary
+        want = reminder_line(fixed, labels)
+    except Exception:  # noqa: BLE001
+        return summary
+    if not want:
+        return summary
+    log.info("「%s」模型没写语音提醒行，已按程序兜底补上", gname or gid)
+    out = (summary or "").rstrip()
+    return (out + "\n\n" + want) if out else want
+
+
 def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = None,
               mode: str | None = None) -> SummarizeRun | None:
     """生成当日总结。没配置 LLM 就抛 RuntimeError；当天没有归档消息返回 None。
@@ -852,6 +932,13 @@ def summarize(date_str: str, print_prompt: bool = False, out_dir: Path | None = 
             log.warning("「%s」总结失败：%s", gname or "合并", e)
             run.errors.append(f"{gname or '合并'}: {type(e).__name__}: {e}")
             continue
+
+        # ⚠️ **程序保证**加星成员的语音提醒行一定在（不靠模型自觉）。
+        # 2026-10-15 踩到：prompt 里明明给了清单（可贞 41 条 + 周少彬 4 条），
+        # 但「易青岚乙巳年弟子群」这次模型就是**没写**那一行，
+        # 于是归档稿没有、提炼那层自然也无从保留（上一轮只给提炼加了兜底，不够）。
+        # 该函数在"本来没有加星语音"时是空操作，所以无条件调用即可。
+        summary = _ensure_reminder_in_summary(summary, gid, gname, win_rows, labels)
 
         if gid:
             # 没标定时用群 id（剥掉 @chatroom 尾巴让文件名干净些：g4@chatroom → g4）

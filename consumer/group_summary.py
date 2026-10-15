@@ -53,9 +53,12 @@ REFINE_PROMPT = """下面是一份**供内部归档使用的**群聊总结稿。
 请直接输出改写后的成品（只输出要点，每行以「- 」开头）："""
 
 
-#: 语音提醒行的识别正则（形状见 REFINE_PROMPT 第 8 条）。
-#: 用正则而不是固定前缀：模型可能把前导的 `- ` 丢掉、或前后有空白。
-REMINDER_RE = re.compile(r"提醒：本时段.*?请回群自行查看[^\n]*")
+#: 语音提醒行的识别正则。
+#: ⚠️ 必须**宽容**：模型经常改措辞（漏掉"请回群自行查看"、写成"回群自行查看"、
+#: 漏掉前导 `- `），一旦匹配不上，兜底就会**再补一条** → 正文里出现两条提醒行
+#: （2026-10-15 实测 `岳章形家风水班.md` 里就同时有 ★可贞 与 ★周少彬 两条）。
+#: 这里只要求以「提醒：本时段」开头，到行尾为止都算这一行。
+REMINDER_RE = re.compile(r"^[ \t]*[-*]?[ \t]*提醒：本时段[^\n]*", re.M)
 
 
 def extract_reminder(text: str) -> str:
@@ -63,23 +66,28 @@ def extract_reminder(text: str) -> str:
     m = REMINDER_RE.search(text or "")
     if not m:
         return ""
-    return "- " + m.group(0).strip().lstrip("-").strip()
+    line = m.group(0).strip()
+    while line[:1] in ("-", "*"):
+        line = line[1:].strip()
+    return "- " + line
 
 
-def ensure_reminder(refined: str, source: str) -> str:
-    """**程序保证**提炼结果里有语音提醒行（不依赖模型自觉）。
+def ensure_reminder(refined: str, source: str, want: str = "") -> str:
+    """**程序保证**提炼结果里有语音提醒行，并**规范成 `want` 的确切文本**。
 
     2026-10-13 实测问题：归档稿里有提醒行，但提炼时被模型当噪音删掉了
     （1071 字 → 343 字，提醒行整行消失），于是**发进群的内容里没有提醒**。
-    提示词里已加了第 8 条硬要求；这里再加一道兜底：提炼结果若丢了就补回去。
+    2026-10-15 又发现第二层问题：模型在总结里只写了句含糊的
+    「提醒：本时段 有语音，请回群自行查看」（没有时间、没有人名），提炼会原样留下。
+
+    所以统一用**程序生成的确切文本**（`digest.reminder_line`）：有就替换、没有就补上。
+    `want` 传空时退回"从 source 里取"的行为。
     """
-    want = extract_reminder(source)
+    from consumer.digest import replace_reminder        # 局部 import 避免循环依赖
+    want = want or extract_reminder(source)
     if not want:
         return refined
-    if extract_reminder(refined):
-        return refined                      # 已经保留了
-    out = (refined or "").rstrip()
-    return (out + "\n" + want) if out else want
+    return replace_reminder(refined, want)
 
 
 def refine_for_group(summary: str, llm_cfg: dict, date_str: str = "",

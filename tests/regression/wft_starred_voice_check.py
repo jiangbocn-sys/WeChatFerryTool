@@ -148,6 +148,81 @@ check("summarize() 把 rows 传给 build_prompt", "rows=win_rows" in s_src)
 check("load_window_rows 与归档同窗口",
       "_digest_window_for" in inspect.getsource(S.load_window_rows))
 
+print("\n[G] **总结层**兜底：模型不写提醒行也要保证它在（10-15 用户报）")
+# 2026-10-15 实测：prompt 里给了清单（可贞 41 条 + 周少彬 4 条），但该群模型就是没写
+# 提醒行 → 归档稿没有、提炼层无从保留。所以兜底必须**落在总结这一层**。
+from consumer.digest import reminder_line, replace_reminder  # noqa: E402
+from consumer.summarize import _ensure_reminder_in_summary  # noqa: E402
+from consumer.group_summary import ensure_reminder, extract_reminder  # noqa: E402
+
+ROWS2 = [
+    {"msg_id": "a", "group_name": GID, "sender": STAR, "msg_type": 34,
+     "received_at": T0, "transcript": "", "content": ""},
+    {"msg_id": "b", "group_name": GID, "sender": STAR, "msg_type": 34,
+     "received_at": T0 + 60, "transcript": "", "content": ""},
+]
+WANT = reminder_line(ROWS2, LABELS)
+check("reminder_line 生成成品行", WANT.startswith("- 提醒：本时段") and "12:44" in WANT, WANT)
+check("reminder_line 含人名与条数", "周宏伟" in WANT and "2 条语音" in WANT, WANT)
+check("reminder_line 说明内容未获取 + 请回群",
+      "内容未获取" in WANT and "请回群自行查看" in WANT)
+check("无加星语音时 reminder_line 为空",
+      reminder_line([{**ROWS2[0], "msg_type": 1}], LABELS) == "")
+
+fake = "- 讲了取用神\n- 安排了明晚纳甲课"
+got = _ensure_reminder_in_summary(fake, GID, "测试群", ROWS2, LABELS)
+check("**模型没写 → 兜底补到正文里**", "提醒：本时段" in got and "12:44" in got, got[-70:])
+check("兜底加在最后一行", got.rstrip().splitlines()[-1].startswith("- 提醒"), got[-60:])
+bad = fake + "\n- 提醒：本时段 有语音（内容未获取），请回群自行查看"
+got2 = _ensure_reminder_in_summary(bad, GID, "测试群", ROWS2, LABELS)
+check("**模型写歪 → 规范成程序生成的确切文本**",
+      got2.count("提醒：本时段") == 1 and "12:44" in got2, got2[-80:])
+check("没有加星语音时不凭空加",
+      _ensure_reminder_in_summary(fake, GID, "测试群",
+                                  [{**ROWS2[0], "msg_type": 1}], LABELS) == fake)
+check("replace_reminder 无提醒行时补在最后",
+      replace_reminder(fake, WANT).rstrip().splitlines()[-1].startswith("- 提醒"))
+refined = "- 归纳一\n- 提醒：本时段 有语音，请回群自行查看"
+fixed = ensure_reminder(refined, "x", want=WANT)
+check("提炼层规范成同一份文本（归档稿 = 发群稿）",
+      extract_reminder(fixed) == WANT, extract_reminder(fixed)[:90])
+
+print("\n[H] **绝不串群**：本群没有加星语音就不能出现提醒（10-15 用户报）")
+# 用户报："发起语音的提示串群了，可贞并没有在乙巳年弟子群中发语音"。
+# 根因：兜底里写了 `fixed or rows` —— 某群过滤后为空时退回**全部会话**的行，
+# 于是岳章形家风水班的 ★可贞 串进了乙巳年弟子群的总结。
+G2 = "g2@chatroom"
+ROWS_MIX = ROWS2 + [
+    {"msg_id": "c", "group_name": G2, "sender": "wxid_other_star", "msg_type": 34,
+     "received_at": T0 + 300, "transcript": "", "content": ""},
+]
+LAB2 = {
+    "groups": {
+        GID: {"name": "甲群", "focus_members": [STAR]},
+        G2: {"name": "乙群", "focus_members": ["wxid_other_star"]},
+    },
+    "senders": {STAR: {"name": "周宏伟"}, "wxid_other_star": {"name": "可贞"}},
+}
+only_g2 = reminder_line([r for r in ROWS_MIX if r["group_name"] == G2], LAB2)
+check("乙群自己的提醒只含乙群的人", "可贞" in only_g2 and "周宏伟" not in only_g2, only_g2)
+empty_rows = [r for r in ROWS_MIX if r["group_name"] == "g3@chatroom"]
+check("没有该群的行时 reminder_line 为空（不能拿别群顶）",
+      reminder_line(empty_rows, LAB2) == "")
+# 关键：给甲群做兜底时，绝不能把乙群的可贞写进去
+out_g1 = _ensure_reminder_in_summary(fake, GID, "甲群", ROWS_MIX, LAB2)
+check("**甲群兜底不含乙群的可贞**", "可贞" not in out_g1, out_g1[-90:])
+check("甲群兜底含自己的周宏伟", "周宏伟" in out_g1)
+# 该群一条加星语音都没有 → 不加任何提醒行
+no_voice_g1 = [r for r in ROWS_MIX if r["group_name"] == GID and r["msg_type"] != 34]
+check("本群无加星语音 → 不补提醒行（即使别群有）",
+      _ensure_reminder_in_summary(fake, GID, "甲群", no_voice_g1 + ROWS_MIX[2:], LAB2) == fake)
+# 识别要宽容，否则会补出第二条（上午岳章那份就出现两条）
+loose = fake + "\n- 提醒：本时段 有语音，回群自行查看"
+check("模型漏写「请」字也能识别（不会补出第二条）",
+      _ensure_reminder_in_summary(loose, GID, "甲群", ROWS_MIX, LAB2).count("提醒：本时段") == 1)
+check("extract_reminder 认「提醒：本时段」开头即可",
+      extract_reminder("- 提醒：本时段 随便写的什么").startswith("- 提醒"))
+
 shutil.rmtree(SC, ignore_errors=True)
 print("=" * 60)
 if FAILS:

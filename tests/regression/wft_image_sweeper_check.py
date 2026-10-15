@@ -195,7 +195,11 @@ check("有 image_dir（图片归档目录）", "self.image_dir" in src)
 check("装配了图片配对线程", "image-pair" in src)
 check("配对循环存在", hasattr(Consumer, "_image_pair_loop"))
 loop_src = inspect.getsource(Consumer._image_pair_loop)
-check("配对循环用 store.message_near 找图片消息", "message_near" in loop_src)
+# 2026-10-14 配对改造：首选**内容 md5**确定性绑定（`message_by_image_md5`），
+# 回退才用时序多候选 `messages_near`（复数，返回全部候选 + 内容）。
+# 旧断言写的是单数 `message_near` —— 改 API 时漏同步，导致误报（10-15 修）。
+check("配对循环用 store.messages_near 做时序回退", "messages_near" in loop_src)
+check("配对循环优先按内容 md5 绑定", "message_by_image_md5" in loop_src)
 check("配对循环把图存成 <msg_id>.jpg", "{mid}" in loop_src)
 
 shutil.rmtree(SC, ignore_errors=True)
