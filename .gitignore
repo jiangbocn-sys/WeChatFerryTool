@@ -49,3 +49,4 @@ tools/.account_snapshot.json
 .DS_Store
 Thumbs.db
 kb_dirs.txt
+accounts/*/kb/

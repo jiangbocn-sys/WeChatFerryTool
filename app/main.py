@@ -405,8 +405,17 @@ class App:
             log.warning("待初始化状态，忽略自动回复开关")
             return
         self.consumer.replier.cfg.enabled = bool(on)
-        log.warning("自动回复 → %s%s", "开启" if on else "关闭",
-                    "（注意封号风险）" if on else "")
+        # 知识库问答**共用这个总闸**（见 replier.kb_enabled_for）：
+        # 开着它时自动回复与知识库一起生效，关掉时两个都不再发言。
+        _kb_on = (self.consumer.replier.cfg.kb.enabled
+                  and bool(self.consumer.replier.cfg.kb_on_by_group))
+        _extra = ""
+        if _kb_on:
+            _kb_mode = ("测试模式（只记日志）"
+                        if self.consumer.replier.cfg.kb.test_only else "**真实发送**")
+            _extra = f"；📚 知识库问答同时{'开启' if on else '关闭'}（{_kb_mode}）"
+        log.warning("自动回复 → %s%s%s", "开启" if on else "关闭",
+                    "（注意封号风险）" if on else "", _extra)
 
     # ---- 暂停抓取 ----
     # 实现方式：清空 DLL 的回调地址（实测 POST /set_callback 空 body 的语义就是"清空"）
