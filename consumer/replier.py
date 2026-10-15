@@ -56,6 +56,30 @@ class ReplyTemplate:
 
 
 @dataclass
+class KbConfig:
+    """群知识库问答的**独立**参数（与自动回复模板互不影响）。
+
+    用户 2026-10-15 定的口径：
+      * 每群**各自** 2 分钟一条（`per_group_cooldown_s=120`）
+      * 连续提问**排队**（上限 10，同人去重）
+      * 回复前随机 **5~10 秒**延迟
+      * 默认 `test_only=True` 先观察
+      * 触发：消息**以 `@<虚拟号>` 开头**（名字**按群可配**）
+    """
+    enabled: bool = False
+    cooldown_s: int = 120             # 每群两次回答最小间隔
+    delay_min_s: int = 5
+    delay_max_s: int = 10
+    max_queue: int = 10               # 每群最多排队条数
+    daily_limit: int = 200            # 全局日限（防失控）
+    dedup_window_s: int = 120         # 同人重复提问去重窗口
+    self_check: bool = True           # 回答后做第二遍自检
+    top_k: int = 5                    # 检索片段数
+    test_only: bool = True            # 只记日志不发（默认开）
+    disclaimer: str = "（据资料整理，如有出入以老师讲解为准）"
+
+
+@dataclass
 class ReplyConfig:
     enabled: bool = False
     templates: list[ReplyTemplate] = field(default_factory=list)
@@ -65,6 +89,11 @@ class ReplyConfig:
     llm_model: str = "deepseek-chat"
     llm_timeout_s: float = 30.0
     history_count: int = 10  # 生成回复时附带的最近对话条数（0=不带）
+    kb: KbConfig = field(default_factory=KbConfig)
+    #: 群 → 虚拟号名（`labels.groups.<gid>.kb_at`）。触发用，按群可配。
+    kb_trigger_by_group: dict[str, str] = field(default_factory=dict)
+    #: 群 → 是否开启知识库问答（`labels.groups.<gid>.kb_on`）
+    kb_on_by_group: dict[str, bool] = field(default_factory=dict)
 
 
 class Replier:
@@ -76,6 +105,7 @@ class Replier:
         labels_path: Path | None = None,
         sent_tracker: "SentTracker | None" = None,
         history_fn: "Callable[[str, int], list[dict]] | None" = None,
+        state_path: Path | None = None,
     ):
         self.cfg = cfg
         self.hook = hook
@@ -83,12 +113,29 @@ class Replier:
         self.labels_path = labels_path
         self.sent_tracker = sent_tracker
         self.history_fn = history_fn  # (group_name, limit) -> 最近消息列表（时间倒序）
+        # 知识库用**独立**的限速状态文件（与模板回复互不干扰）
+        self._kb_state_path = (state_path or (rate_limiter.state_path)).with_name(
+            (state_path or rate_limiter.state_path).stem + "_kb.json")
         self._timers: list[threading.Timer] = []  # 防止 GC
         # 冷却期内的触发排队（不丢弃）
         self.MAX_QUEUE_PER_GROUP = 3
         self._queues: dict[str, deque] = {}
         self._queue_timers: dict[str, threading.Timer] = {}
         self._q_lock = threading.Lock()
+        # ---- 知识库问答：独立限速 / 队列 / 去重 ----
+        self._kb_rl = RateLimiter(
+            self._kb_state_path,
+            RateLimitConfig(per_group_cooldown_s=int(cfg.kb.cooldown_s),
+                            global_daily_limit=int(cfg.kb.daily_limit),
+                            min_delay_s=int(cfg.kb.delay_min_s),
+                            max_delay_s=int(cfg.kb.delay_max_s)),
+        )
+        self._kb_q: dict[str, deque] = {}       # 群 → [(sender, question, ts)]
+        self._kb_timer: dict[str, threading.Timer] = {}
+        self._kb_lock = threading.Lock()
+        self._kb_seen: deque = deque(maxlen=200)   # (群, 发送人, 问题指纹, 时间)
+        self._kb_data_root: Path | None = None
+        self._kb_ask = None                     # 延迟注入 kb_answer.answer_question
 
     @classmethod
     def from_yaml(cls, raw: dict, hook: HookClient, state_path: Path,
@@ -134,8 +181,46 @@ class Replier:
             llm_model=llm_model or "deepseek-chat",
             history_count=int(raw.get("history_count", 10)),
         )
-        return cls(cfg, hook, RateLimiter(state_path, rl_cfg), labels_path=labels_path,
-                   sent_tracker=sent_tracker, history_fn=history_fn)
+        # ---- 群知识库问答（独立子段 `replies.kb`）----
+        kr = raw.get("kb") or {}
+        cfg.kb = KbConfig(
+            enabled=bool(kr.get("enabled", False)),
+            cooldown_s=int(kr.get("cooldown_s", 120)),
+            delay_min_s=int(kr.get("delay_min_s", 5)),
+            delay_max_s=int(kr.get("delay_max_s", 10)),
+            max_queue=int(kr.get("max_queue", 10)),
+            daily_limit=int(kr.get("daily_limit", 200)),
+            dedup_window_s=int(kr.get("dedup_window_s", 120)),
+            self_check=bool(kr.get("self_check", True)),
+            top_k=int(kr.get("top_k", 5)),
+            test_only=bool(kr.get("test_only", True)),
+            disclaimer=str(kr.get("disclaimer")
+                           or "（据资料整理，如有出入以老师讲解为准）"),
+        )
+        obj = cls(cfg, hook, RateLimiter(state_path, rl_cfg), labels_path=labels_path,
+                  sent_tracker=sent_tracker, history_fn=history_fn, state_path=state_path)
+        if labels_path:
+            obj._load_kb_group_fields(labels_path)
+        return obj
+
+    # ---- 知识库：按群的开关与虚拟号名 ----
+
+    def _load_kb_group_fields(self, labels_path: Path) -> None:
+        """从 labels.json 读**按群**的 `kb_on` / `kb_at`（页面可改，热重载可用）。"""
+        try:
+            data = json.loads(labels_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        groups = data.get("groups") or {}
+        self.cfg.kb_trigger_by_group = {
+            str(g): str((v or {}).get("kb_at") or "").strip()
+            for g, v in groups.items()
+            if str((v or {}).get("kb_at") or "").strip()
+        }
+        self.cfg.kb_on_by_group = {
+            str(g): bool((v or {}).get("kb_on"))
+            for g, v in groups.items() if (v or {}).get("kb_on")
+        }
 
     def _resolve_at(self, sender_wxid: str) -> str:
         """查 labels 找发送人的标定显示名，返回 `@<name>\u2005` 用于 @ 提及。
@@ -474,3 +559,208 @@ class Replier:
                 t.cancel()
             self._queue_timers.clear()
             self._queues.clear()
+        with self._kb_lock:
+            for t in self._kb_timer.values():
+                t.cancel()
+            self._kb_timer.clear()
+            self._kb_q.clear()
+
+    # =====================================================================
+    # 群知识库问答（独立于上面的模板回复）
+    # =====================================================================
+
+    def reload_kb_group_fields(self) -> None:
+        """页面改了按群的开关/虚拟号名后，热重载（不重启 app）。"""
+        if self.labels_path:
+            self._load_kb_group_fields(self.labels_path)
+
+    def kb_trigger_name(self, group_name: str) -> str:
+        """该群的虚拟号名（没配就用全局默认 `小易`）。"""
+        return (self.cfg.kb_trigger_by_group.get(group_name) or "小易").strip()
+
+    def kb_enabled_for(self, group_name: str) -> bool:
+        """该群是否开了知识库问答。
+
+        总闸 `replies.kb.enabled` **与该群的 `kb_on` 都要开**才算开 ——
+        避免"总闸一开所有群都被答"。
+        """
+        if not self.cfg.kb.enabled:
+            return False
+        return bool(self.cfg.kb_on_by_group.get(group_name))
+
+    def maybe_reply_kb(self, *, group_name: str, sender: str, content: str) -> bool:
+        """知识库问答入口。返回 True 表示**已接管**这条消息（调用方就不用再走模板匹配）。
+
+        流程：触发匹配 → 去重 → 限速判定 → 直接答 or 排队。
+        """
+        if not self.kb_enabled_for(group_name):
+            return False
+        name = self.kb_trigger_name(group_name)
+        try:
+            from consumer.kb_answer import strip_trigger
+        except Exception as e:  # noqa: BLE001
+            log.warning("知识库模块不可用: %s", e)
+            return False
+        q = strip_trigger(content, name)
+        if q is None:
+            return False                      # 不是 @<虚拟号> 开头 → 不接管
+        # 去重：同群、同人、相似问题，在一个窗口内只答一次
+        fp = self._kb_fp(q)
+        now = time.time()
+        with self._kb_lock:
+            for g, s, f, ts in list(self._kb_seen):
+                if g == group_name and s == sender and f == fp \
+                        and now - ts < self.cfg.kb.dedup_window_s:
+                    log.info("知识库：重复提问已忽略（群=%s 人=%s）", group_name, sender)
+                    return True
+            self._kb_seen.append((group_name, sender, fp, now))
+
+        if self.cfg.kb.test_only:
+            log.info("🧪 [知识库·测试模式] 群=%s 提问=%s 问题=%s",
+                     group_name, sender, q[:80])
+            return True
+
+        allowed, reason, wait_s = self._kb_rl.can_reply(group_name)
+        if allowed:
+            delay = self._kb_rl.pick_delay()
+            log.info("📚 计划回答 群=%s 延迟=%ds 问题=%s", group_name, delay, q[:60])
+            self._schedule_kb(group_name, delay, sender, q)
+            return True
+        if reason.startswith("group_cooldown"):
+            with self._kb_lock:
+                dq = self._kb_q.setdefault(group_name, deque())
+                if len(dq) >= self.cfg.kb.max_queue:
+                    dropped = dq.popleft()        # 丢最早的（已过时）
+                    log.warning("知识库队列已满，丢弃最早一条：群=%s 问题=%s",
+                                group_name, str(dropped[1])[:40])
+                dq.append((sender, q, now))
+                qlen = len(dq)
+            log.info("知识库冷却中（还需 %ds），已排队第 %d 条：群=%s 问题=%s",
+                     wait_s, qlen, group_name, q[:40])
+            self._schedule_kb(group_name, max(1.0, wait_s + 1), None, None)
+            return True
+        log.info("知识库不回答（不可排队）：群=%s 原因=%s", group_name, reason)
+        return True
+
+    @staticmethod
+    def _kb_fp(q: str) -> str:
+        """问题指纹：去空白/标点后取前 40 字（用于"同一问题"去重）。"""
+        s = re.sub(r"[\s\u2005\u00a0，,。.！!？?；;：:、]+", "", q or "")
+        return s[:40]
+
+    def _schedule_kb(self, group_name: str, after_s: float,
+                     sender: str | None, question: str | None) -> None:
+        """安排一次知识库回答（直接答 or 排空队列）。"""
+        if sender is not None and question is not None:
+            t = threading.Timer(max(0.1, after_s), self._kb_answer_one,
+                                args=(group_name, sender, question))
+            t.daemon = True
+            t.start()
+            self._timers.append(t)
+            return
+        with self._kb_lock:
+            cur = self._kb_timer.get(group_name)
+            if cur is not None and cur.is_alive():
+                return
+            t = threading.Timer(max(1.0, after_s), self._kb_drain, args=(group_name,))
+            t.daemon = True
+            self._kb_timer[group_name] = t
+            t.start()
+
+    def _kb_drain(self, group_name: str) -> None:
+        """冷却结束后逐条回答排队的提问（每条重新等冷却，保持 2 分钟间隔）。"""
+        while True:
+            with self._kb_lock:
+                dq = self._kb_q.get(group_name)
+                if not dq:
+                    self._kb_timer.pop(group_name, None)
+                    return
+            allowed, reason, wait_s = self._kb_rl.can_reply(group_name)
+            if not allowed:
+                if reason.startswith("group_cooldown"):
+                    time.sleep(min(max(wait_s, 1), 60))
+                    continue
+                with self._kb_lock:
+                    dropped = len(self._kb_q.pop(group_name, []) or [])
+                    self._kb_timer.pop(group_name, None)
+                log.warning("知识库日限已满，丢弃排队 %d 条：群=%s", dropped, group_name)
+                return
+            with self._kb_lock:
+                dq = self._kb_q.get(group_name)
+                if not dq:
+                    self._kb_timer.pop(group_name, None)
+                    return
+                sender, q, _ts = dq.popleft()
+                remain = len(dq)
+            log.info("知识库排队出队回答：群=%s（剩余 %d）", group_name, remain)
+            self._kb_answer_one(group_name, sender, q)
+
+    def _kb_answer_one(self, group_name: str, sender: str, question: str) -> None:
+        """真正查资料 + 生成 + 自检 + 发送（失败只记日志，绝不发兜底噪音）。"""
+        data_root = self._kb_data_root
+        if data_root is None:
+            try:
+                import paths
+                data_root = paths.data_root()
+            except Exception:  # noqa: BLE001
+                log.error("知识库：拿不到数据根，放弃回答")
+                return
+        try:
+            if self._kb_ask is None:
+                from consumer.kb_answer import answer_question as _aq
+                self._kb_ask = _aq
+            res = self._kb_ask(question, group_name, data_root,
+                               top_k=self.cfg.kb.top_k,
+                               self_check=self.cfg.kb.self_check,
+                               disclaimer=self.cfg.kb.disclaimer)
+        except Exception as e:  # noqa: BLE001
+            log.error("知识库回答失败（不发兜底噪音）：群=%s 问题=%s err=%s",
+                      group_name, question[:40], e)
+            return
+        text = (res.answer or "").strip()
+        if not text:
+            log.warning("知识库：空回答，未发送（群=%s 问题=%s）", group_name, question[:40])
+            return
+        # 群里带上提问人的 @ 前缀（复用现有 _resolve_at）
+        at = self._resolve_at(sender)
+        if at and "@chatroom" in group_name and not text.lstrip().startswith("@"):
+            text = at + text
+        try:
+            result = self.hook.send_text(group_name, text)
+            log.info("📚 知识库已回答 群=%s ret=%s 来源=%d 段 字数=%d",
+                     group_name, result, len(res.hits), len(text))
+            self._kb_rl.record_reply(group_name)
+            if self.sent_tracker is not None:
+                self.sent_tracker.record(group_name, text)
+            self._kb_audit(group_name, sender, question, res, text)
+        except HookError as e:
+            log.error("知识库发送失败: %s", e)
+
+    def _kb_audit(self, group_name: str, sender: str, question: str,
+                  res, text: str) -> None:
+        """审计：问题 / 命中来源 / 回答 / 自检结论，写 `data/kb_qa.jsonl`。
+
+        为什么要审计：`send_text` 的返回值**恒为 ret=0**（项目里已踩过），
+        发送成功与否无法从返回值判断；出问题只能靠这份日志回查。
+        """
+        try:
+            import paths
+            p = paths.data_root() / "data" / "kb_qa.jsonl"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            rec = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "group": group_name,
+                "asker": sender,
+                "question": question,
+                "hits": [{"source": h.source, "topic": h.topic, "score": round(h.score, 3)}
+                         for h in (res.hits or [])],
+                "grounded": res.grounded,
+                "dropped": (res.dropped or "")[:300],
+                "llm_calls": res.llm_calls,
+                "from_kb": res.from_kb,
+                "answer": text,
+            }
+            with p.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception as e:  # noqa: BLE001
+            log.debug("知识库审计写入失败: %s", e)

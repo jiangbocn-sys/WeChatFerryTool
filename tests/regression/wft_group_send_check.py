@@ -257,7 +257,12 @@ check("UI 明确写了『与自动回复相互独立』", "相互独立" in
 # 发群的调参段里**不能有 enabled**（用户 10-12 要求删掉那个选项）
 app_txt = (PROJ / "web" / "app.py").read_text(encoding="utf-8")
 seg = app_txt[app_txt.index('"path": "digest.send_to_group"'):]
-seg = seg[:seg.index("}]}")] if "}]}" in seg else seg[:2200]
+# ⚠️ 不能再用固定长度兜底（`seg[:2200]`）：后面新增字段/段落时会**跨段**，
+#    把别的段里的 `"enabled"` / `"总闸"` 也扫进来 → 误报
+#    （2026-10-15 新增「群知识库问答」段后连踩两次）。
+#    正解：截到**下一个配置段**（`{"key": "`）或本段结束（`}]}`）为止 —— 取更早的那个。
+_nxt_candidates = [p for p in (seg.find('{"key": "', 1), seg.find("}]}")) if p > 0]
+seg = seg[:min(_nxt_candidates)] if _nxt_candidates else seg
 check("该设置项文案里不再有 enabled 总闸说法",
       "总闸" not in seg and '"enabled"' not in seg, seg[:200])
 check("该设置项已改名为『高级参数』", "高级参数" in seg, seg[:80])

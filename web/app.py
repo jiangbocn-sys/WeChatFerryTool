@@ -266,6 +266,21 @@ def fmt_ts(ts: int | None) -> str:
 
 # ------- Flask app -------
 
+def _kb_doc_count(group_name: str) -> int:
+    """该群已蒸馏的资料份数（读知识库台账；失败就返回 0，页面照常渲染）。
+
+    监控页用它显示"已蒸馏 N 份资料"，让用户一眼看出这个群有没有料。
+    只读、失败静默 —— 不能让台账问题把监控页搞崩（这是页面渲染路径上的调用）。
+    """
+    try:
+        import consumer.kb_notes as _kbn
+        import paths as _paths
+        entries = _kbn.load_sources(_kbn.kb_root(_paths.data_root(), group_name))
+        return sum(1 for e in entries.values() if e.note_file)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _config_context() -> dict:
     """监控规则页需要的上下文：labels、监控名单、可选群/人、每个群的重点关注人。
 
@@ -320,6 +335,12 @@ def _config_context() -> dict:
             # 是否把每日总结发进该群（labels.groups.<gid>.send_summary，默认关。
             # **这是唯一的发送开关** —— 没有全局总闸）
             "send_summary": bool(ent.get("send_summary")),
+            # 群知识库问答（2026-10-15 需求）：资料目录 / 开关 / 虚拟号名
+            "kb_on": bool(ent.get("kb_on")),
+            "kb_at": str(ent.get("kb_at") or ""),
+            "kb_dir": str(ent.get("kb_dir") or ""),
+            # 已蒸馏资料份数（从台账数出来，让页面能看出"这个群有没有料"）
+            "kb_docs": _kb_doc_count(str(ent.get("name") or gid)),
         })
     sender_rows = [{"id": s, "name": disp("senders", s)} for s in mon_senders]
 
@@ -718,6 +739,72 @@ def create_app() -> Flask:
               "suggest": '想先演练就填：{"dry_run": true, "refine": true, "chunk_chars": 1800, '
                          '"min_interval_s": 2}；确认无误后改成：{"dry_run": false}'},
          ]},
+        {"key": "kb", "title": "📚 群知识库问答（按资料回答）",
+         "note": "⚠️ **总闸在这里，但每个群还要各自勾选**（见「🎯 监控规则」页的"
+                 "「📚 知识库」列）。总闸 + 群勾选**都开**才会答。\n"
+                 "触发规则：消息**以 `@<该群虚拟号名>` 开头**才回答（默认「小易」，可按群改）。\n"
+                 "回答口径：**助教第三人称**、必须标出处、答完再做一次**自检**剔除资料外内容；"
+                 "资料里没有就回「资料中未涉及这个问题，建议请教老师」——**不编造**。\n"
+                 "问答记录：`data/kb_qa.jsonl`（问题 / 命中来源 / 回答 / 自检结论）。", "fields": [
+             {"path": "replies.kb.enabled", "label": "启用群知识库问答（总闸，默认关）", "kind": "bool",
+              "impact": "开着**且**某群勾了「知识库开关」时，那个群里以 `@虚拟号名` 开头的消息会被自动回答。"
+                        "⚠️ 这是**主动往群里发言**，和自动回复一样有被风控的可能；"
+                        "关闭则完全不接管任何消息（自动回复不受影响）",
+              "suggest": "先保持**关闭**，资料蒸馏好、看过后台日志再开"},
+             {"path": "replies.kb.test_only", "label": "测试模式：只记日志不发送（建议先开）",
+              "kind": "bool",
+              "impact": "开着时：识别提问、查资料、生成回答，但**不往群里发**，只在日志写"
+                        "「🧪 [知识库·测试模式] 群=… 问题=…」。**仍然会接管消息**"
+                        "（不会被自动回复再答一遍）。关掉后才是真实发送。",
+              "suggest": "**强烈建议先开**，看一两天日志确认口径无误再关"},
+             {"path": "replies.kb.cooldown_s", "label": "每群回答间隔（秒）", "kind": "number",
+              "min": 10, "max": 3600,
+              "impact": "同一个群两次回答的最小间隔（**按群各自算**）；间隔内的提问会**排队**、"
+                        "到点按顺序回答，不会丢",
+              "suggest": "默认 120（每 2 分钟一条）"},
+             {"path": "replies.kb.delay_min_s", "label": "回答前最小延迟（秒）", "kind": "number",
+              "min": 0, "max": 600,
+              "impact": "检测到提问后等这么久才发（模拟人在看信息，降风控）",
+              "suggest": "默认 5"},
+             {"path": "replies.kb.delay_max_s", "label": "回答前最大延迟（秒）", "kind": "number",
+              "min": 0, "max": 600,
+              "impact": "延迟在 min~max 之间随机取",
+              "suggest": "默认 10"},
+             {"path": "replies.kb.max_queue", "label": "每群排队上限（条）", "kind": "number",
+              "min": 1, "max": 100,
+              "impact": "冷却期内连续提问会排队；超过上限时**丢掉最早那条**（老问题答案别人已看到）",
+              "suggest": "默认 10"},
+             {"path": "replies.kb.daily_limit", "label": "全局每天最多回答（条）", "kind": "number",
+              "min": 1, "max": 5000,
+              "impact": "防失控的兜底上限（每次回答要 2 次大模型调用）",
+              "suggest": "默认 200"},
+             {"path": "replies.kb.dedup_window_s", "label": "重复提问去重窗口（秒）", "kind": "number",
+              "min": 0, "max": 3600,
+              "impact": "同一个人在这个时间内问**相似的问题**（去空白标点后前 40 字相同）只答一次",
+              "suggest": "默认 120"},
+             {"path": "replies.kb.self_check", "label": "回答后做第二遍自检（建议开）", "kind": "bool",
+              "impact": "拿「回答 + 检索到的资料片段」再问一次大模型：有没有片段里查不到的内容？"
+                        "有就把那些句子删掉，或整条改成「资料中未涉及」。\n"
+                        "**这是「只用资料回答」能落地的关键**（只靠提示词约束不可靠）；"
+                        "代价是每次回答多一次大模型调用",
+              "suggest": "保持**开启**"},
+             {"path": "replies.kb.top_k", "label": "每次检索的片段数", "kind": "number",
+              "min": 1, "max": 20,
+              "impact": "回答时从笔记里选几段作为依据；越多越全但越费 token",
+              "suggest": "默认 5"},
+             {"path": "replies.kb.disclaimer", "label": "回答末尾的免责说明", "kind": "text",
+              "impact": "每次回答自动追加一行，提示读者以老师讲解为准；留空则不追加",
+              "suggest": "默认「（据资料整理，如有出入以老师讲解为准）」"},
+             {"path": "kb.allow_ext", "label": "资料目录里要处理的文件类型", "kind": "list",
+              "impact": "只处理这些扩展名，其它文件直接跳过（不报错）。"
+                        "`.doc`/`.ppt` 需要本机装了 Office；`.pdf` 需要文字层"
+                        "（扫描件会明确报「取不到文字」而不是假装成功）",
+              "suggest": "默认 .txt/.md/.csv/.pdf/.docx/.doc/.pptx/.ppt/.xlsx"},
+             {"path": "kb.auto_distill_time", "label": "每天自动检查资料更新并增量蒸馏（留空=关）",
+              "kind": "text",
+              "impact": "到点比对资料指纹，**只有新增/修改过的文件**才会重新蒸馏（没变化不花额度）",
+              "suggest": "如 07:00；不确定就留空，先手动蒸馏"},
+         ]},
         {"key": "voice", "title": "语音捕获", "fields": [
              {"path": "voice.enabled", "label": "启用语音捕获", "kind": "bool",
               "impact": "关掉后语音不存档、也不转写（消息仍会入库为 [语音] 占位）",
@@ -864,7 +951,15 @@ def create_app() -> Flask:
             return request.form.get(name) == "on"
         if kind == "list":
             raw = request.form.get(name, "") or ""
-            return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            new = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            # ⚠️ 与 bool/select 同样的隔离性处理（2026-10-15 修）：
+            #    原来无条件返回列表 → 即使配置里**本来没有**这一项，
+            #    "原样保存一次"也会凭空多出一个段/键（`kb.allow_ext` 就这么冒出来的），
+            #    破坏"改一处不动其它"（wft_isolation_check / wft_retention_check 锁着）。
+            cur = _dig(cfg, f["path"], None)
+            if not new:
+                return MISSING if cur is None else []
+            return MISSING if list(cur or []) == new else new
         if kind == "overrides":
             out: dict[str, str] = {}
             for ln in (request.form.get(name, "") or "").splitlines():
@@ -1146,12 +1241,15 @@ def create_app() -> Flask:
             if sid in (labels.get("senders") or {}):
                 labels["senders"][sid]["monitored"] = False
         elif action == "save_hints":
-            # 每群总结提示 + "是否把总结发到群内"（字段名 hint_<群id> / send_<群id>），
+            # 每群：总结提示 / 是否把总结发到群内 / 知识库问答（开关·虚拟号名·资料目录）
+            # 字段名 hint_<群id> / send_<群id> / kb_on_<群id> / kb_at_<群id> / kb_dir_<群id>，
             # 一次提交所有监控群。⚠️ 只处理**监控名单里**的群，避免页面之外的字段被写进来。
             saved_n = 0
             for gkey in _lst("groups"):
                 field = f"hint_{gkey}"
-                if field not in request.form and f"send_{gkey}" not in request.form:
+                kb_fields = (f"kb_on_{gkey}", f"kb_at_{gkey}", f"kb_dir_{gkey}")
+                if (field not in request.form and f"send_{gkey}" not in request.form
+                        and not any(k in request.form for k in kb_fields)):
                     continue
                 ent = lab_groups.setdefault(gkey, {})
                 ent.setdefault("name", gkey)
@@ -1168,6 +1266,27 @@ def create_app() -> Flask:
                     ent["send_summary"] = True
                 else:
                     ent.pop("send_summary", None)       # 取消勾选 = 删键，保持一致
+                # ---- 群知识库问答（2026-10-15）----
+                # 只有表单里真有这些字段时才动，避免"页面没渲染"把已有配置抹掉。
+                if any(k in request.form for k in kb_fields):
+                    kb_on = bool(request.form.get(f"kb_on_{gkey}"))
+                    if kb_on:
+                        ent["kb_on"] = True
+                    else:
+                        ent.pop("kb_on", None)
+                    kb_at = (request.form.get(f"kb_at_{gkey}") or "").strip()
+                    if kb_at:
+                        ent["kb_at"] = kb_at
+                    else:
+                        ent.pop("kb_at", None)          # 留空 = 用全局默认名
+                    kb_dir = (request.form.get(f"kb_dir_{gkey}") or "").strip()
+                    if kb_dir:
+                        ent["kb_dir"] = kb_dir
+                    else:
+                        ent.pop("kb_dir", None)
+                    # 目录填了但不存在 → 提示（不阻止保存，用户可能还没建目录）
+                    if kb_dir and not Path(kb_dir).is_dir():
+                        err = (err + "；" if err else "") + f"⚠️ 该群资料目录不存在：{kb_dir}"
                 saved_n += 1
             if not saved_n:
                 err = "没有可保存的群（监控名单为空？）"
@@ -1278,11 +1397,14 @@ def create_app() -> Flask:
                 except ValueError as e:
                     errors.append(f"{sec['title']} · {f['label']}：{e}")
         # 自动回复：全局项 + 模板整段重建
-        for f in REPLY_GLOBAL:
+        # 知识库段（`kb.*` / `replies.kb.*`）的隔离性依赖 `_form_value` 里的
+        # "未提交 / 与当前值相同 → 返回 MISSING" 规则（见 bool / list / select 分支），
+        # **不额外写缺省值**，否则改个推送阈值也会凭空多出一个 `kb` 段。
+        for _f in REPLY_GLOBAL:
             try:
-                _put(cfg, f["path"], _form_value(f, cfg, errors))
+                _put(cfg, _f["path"], _form_value(_f, cfg, errors))
             except ValueError as e:
-                errors.append(f"自动回复 · {f['label']}：{e}")
+                errors.append(f"自动回复 · {_f['label']}：{e}")
         cfg.setdefault("replies", {})["templates"] = _collect_templates(cfg)
 
         t = str(_dig(cfg, "digest.time", "") or "").strip()

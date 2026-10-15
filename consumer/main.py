@@ -13,6 +13,7 @@
 - 私聊：wxid 是对方 wxid，roomid 为空，sender 是对方 wxid
 """
 import json
+import hashlib
 import logging
 import shutil
 import signal
@@ -36,7 +37,7 @@ from consumer.store import Store
 from consumer.voice import capture_voice, decode_to_wav, find_wechat_files_dir
 from consumer.voice_tap import VoiceTap, conv_hash
 from consumer.voice_sweeper import VoiceSweeper
-from consumer.image_sweeper import ImageSweeper
+from consumer.image_sweeper import ImageSweeper, is_complete_image
 
 from paths import config_path, data_root
 
@@ -277,7 +278,8 @@ class Consumer:
         # → 归档/总结里就能按消息直接引用图片（卦例截图这类关键图不再丢）
         if self.image_sweeper is not None:
             threading.Thread(target=self._image_pair_loop, name="image-pair", daemon=True).start()
-            log.info("图片巡检配对已启用（缓存明文缩略图会配回消息并存档）")
+            log.warning("图片巡检配对已启用【三级绑定 v2：md5 → ±300s → orphan，含完整性校验】"
+                        "—— 看到本行说明新代码已加载")
 
         # 每日重点发言归档
         digest_cfg = cfg.get("digest") or {}
@@ -323,6 +325,12 @@ class Consumer:
             sent_tracker=self.sent_tracker,
             history_fn=lambda g, n: self.store.recent(limit=n, group=g),
         )
+        # 知识库需要用**数据根**去读 `kb/<群>/` 的笔记（没有它就无法回答）
+        try:
+            import paths as _paths
+            self.replier._kb_data_root = _paths.data_root()
+        except Exception as e:  # noqa: BLE001
+            log.warning("知识库数据根注入失败（知识库将无法回答）: %s", e)
         if self.replier.cfg.enabled:
             n_test = sum(1 for t in self.replier.cfg.templates if t.test_only)
             n_real = len(self.replier.cfg.templates) - n_test
@@ -332,6 +340,20 @@ class Consumer:
             )
         else:
             log.info("自动回复：禁用（配置 replies.enabled: true 开启）")
+
+        # 知识库问答状态（一眼能看出有没有生效、是测试还是真实发送）
+        _kb = self.replier.cfg.kb
+        if _kb.enabled:
+            _on = sorted(self.replier.cfg.kb_on_by_group.keys())
+            log.warning(
+                "📚 群知识库问答已启用：%d 个群（%s）｜每群冷却 %ds、延迟 %d~%ds、"
+                "队列上限 %d、%s",
+                len(_on), "、".join(_on) or "（没有群配 kb_on）",
+                _kb.cooldown_s, _kb.delay_min_s, _kb.delay_max_s, _kb.max_queue,
+                "**测试模式（只记日志不发送）**" if _kb.test_only else "真实发送",
+            )
+        else:
+            log.info("群知识库问答：未启用（replies.kb.enabled / 群 kb_on）")
 
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
@@ -371,6 +393,14 @@ class Consumer:
         self.labels = self._load_labels()
         new_g, new_s = len(self.labels.get("groups", {})), len(self.labels.get("senders", {}))
         log.info("标定已热重载：群 %d→%d，联系人 %d→%d", old_g, new_g, old_s, new_s)
+        # 知识库的"按群开关/虚拟号名"也存在 labels.json 里 → 一起热重载，
+        # 否则页面上改了 `kb_on`/`kb_at` 还得重启 app 才生效（踩过同类问题）。
+        try:
+            self.replier.reload_kb_group_fields()
+            n_on = len(getattr(self.replier.cfg, "kb_on_by_group", {}) or {})
+            log.info("知识库按群配置已热重载：开启 %d 个群", n_on)
+        except Exception as e:  # noqa: BLE001
+            log.debug("知识库按群配置热重载失败: %s", e)
         return True
 
     def _digest_window_now(self) -> tuple[int, int, str]:
@@ -870,23 +900,68 @@ class Consumer:
             time.sleep(5)
 
     def _image_pair_loop(self) -> None:
-        """把抢到的**明文缩略图**按时间戳配回图片消息，存成 `<msg_id>.jpg`。
+        """把抢到的**明文缩略图**配回图片消息，存成 `<msg_id>.jpg`。
 
-        配对依据：`Thumb/<序号>_<秒级时间戳>_thumb.jpg` 的后缀时间戳 ↔ 消息 `received_at`
-        （实测差值 9 秒即可对上）。存成 `<msg_id>.jpg` 后，归档/总结可以按消息直接引用图片
-        —— 这是"把卦例截图这类关键图带进总结"的落地方式。
+        配对依据（按可靠性排序，2026-10-14 改造）：
+
+        1. **内容 md5**（确定性）：微信图片消息的 XML 声明 `<img md5="…">`，
+           它是**图像内容的哈希**。算出抢到的明文图的 md5，与消息声明的 md5 比对，
+           相等即证明归属 —— 不依赖时间邻近，也不怕同一素材被转发到多个会话。
+        2. **同会话 + 类型 3 + 时间邻近**（次级）：文件名的时间戳与 `received_at` 对齐，
+           实测差 9 秒即可对上。
+        3. **配不上时不丢弃**：移入 `data/images/orphan/` 保留，按 `(会话, ts)` 记账，
+           消息稍后入库或微信延迟落盘时还能再配（旧实现直接丢掉，是覆盖率只有 20% 的主因）。
         """
+        orphan_dir = self.image_dir / "orphan"
+        try:
+            orphan_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         while True:
             try:
                 for chash, ts, path in self.image_sweeper.pending():
-                    conv_id = self._conv_by_hash(chash)
-                    if not conv_id:
+                    # ⚠️ 微信会在写临时图的过程中被抢到 → 文件残缺（无 ff d9 / 0 字节）。
+                    # 实测 161 张里 20 张如此，未校验就归档会让 31 张里 15 张打不开。
+                    if not is_complete_image(path):
+                        log.debug("图片残缺（微信仍在写），丢弃重抢：%s", path.name)
                         self.image_sweeper.take_exact(path)
                         continue
-                    mid = self.store.message_near(conv_id, ts, msg_type=3, tol_s=90)
+                    conv_id = self._conv_by_hash(chash)
+                    if not conv_id:
+                        # 反查不到会话：移入 orphan 保留，别删（微信缓存里的图不可再生）
+                        self._park_orphan(orphan_dir, chash, ts, path)
+                        continue
+
+                    # ---- 1) 内容 md5 确定性绑定 ----
+                    mid = None
+                    digest = self._file_md5(path)
+                    if digest:
+                        mid = self.store.message_by_image_md5(conv_id, digest)
+                        if mid:
+                            log.info("图片按内容 md5 命中 msg=%s (%s)", mid, digest[:12])
+
+                    # ---- 2) 回退到时间邻近 ----
                     if not mid:
-                        continue                      # 图片消息可能还没入库，下一轮再试
-                    # ⚠️ 必须按**确切路径**取（不能用 take(会话, ts)：它会取走另一个文件）
+                        cands = self.store.messages_near(conv_id, ts, msg_type=3, tol_s=300)
+                        if not cands:
+                            # 该会话此刻没有图片消息：可能是历史图（打开窗口时生成的缓存），
+                            # 也可能是消息还没入库 —— orphan 保留，下一轮再试
+                            self._park_orphan(orphan_dir, chash, ts, path)
+                            continue
+                        if digest:
+                            # 有 md5 时只认哈希相等的候选，避免"时间最近但配错"
+                            exact = [c for c in cands if digest.lower() in (c[2] or "").lower()]
+                            if exact:
+                                mid = exact[0][0]
+                            else:
+                                mid = min(cands, key=lambda c: abs(c[1] - ts))[0]
+                        else:
+                            mid = min(cands, key=lambda c: abs(c[1] - ts))[0]
+
+                    if not mid:
+                        self._park_orphan(orphan_dir, chash, ts, path)
+                        continue
+
                     got = self.image_sweeper.take_exact(path)
                     if got is None:
                         continue
@@ -899,8 +974,37 @@ class Consumer:
                     log.info("图片已归档 msg=%s <- %s（%d B）", mid, got.name,
                              dest.stat().st_size)
             except Exception:  # noqa: BLE001
-                log.debug("图片配对循环异常", exc_info=True)
+                # ⚠️ 这里曾经是 log.debug —— basicConfig 是 INFO，所以异常被彻底吞掉，
+                # 表现为"线程活着但什么都不做"，排查了很久。改成 warning 并限流。
+                self._pair_err_count = getattr(self, "_pair_err_count", 0) + 1
+                if self._pair_err_count <= 5 or self._pair_err_count % 120 == 0:
+                    log.warning("图片配对循环异常（第 %d 次）", self._pair_err_count,
+                                exc_info=True)
             time.sleep(5)
+
+    def _park_orphan(self, orphan_dir, chash: str, ts: int, path) -> None:
+        """把配不上的明文图移入 orphan 目录保留（微信缓存不可再生，绝不丢弃）。"""
+        got = self.image_sweeper.take_exact(path)
+        if got is None:
+            return
+        try:
+            dest = orphan_dir / f"{chash}_{ts}{got.suffix or '.jpg'}"
+            shutil.move(str(got), str(dest))
+            log.info("图片未配上消息，已存入 orphan：%s", dest.name)
+        except OSError as e:
+            log.debug("orphan 移动失败 %s", e)
+
+    @staticmethod
+    def _file_md5(path) -> str | None:
+        """算文件的 md5（用于与消息 XML 声明的图像 md5 比对）。"""
+        try:
+            h = hashlib.md5()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return None
 
     def _compute_priority(self, group_name: str, sender: str) -> tuple[int, str]:
         """返回 (priority, reason)。priority=1 表示命中重点关注。
@@ -1086,16 +1190,27 @@ class Consumer:
             #    _in_digest 的敏感关键词命中）。老行为是"名单外的群连库都进不去"，
             #    导致 9:47 那种"明明在微信里有、系统里查无此条"的困惑（10-07 踩到）。
 
-            # 1.5 自动回复检查（只对"别人发来的"消息触发；自己发的不触发）
+            # 1.5 自动回复 / 群知识库问答（只对"别人发来的"消息触发；自己发的不触发）
             #     注意：回复的生效范围由**模板自己的 scope** 决定（replier._match_scope），
             #     与上面的入库范围无关 —— 入库放开不会让回复变宽。
+            #
+            #     知识库**先**判：它以「@<虚拟号>」开头为触发条件，
+            #     命中就"接管"这条消息，不再走模板匹配（避免同一句话被答两次）。
             if not is_self:
                 try:
-                    self.replier.maybe_reply(
+                    took = self.replier.maybe_reply_kb(
                         group_name=group_name, sender=sender, content=content,
                     )
                 except Exception:  # noqa: BLE001
-                    log.exception("replier 处理异常")
+                    took = False
+                    log.exception("知识库问答处理异常")
+                if not took:
+                    try:
+                        self.replier.maybe_reply(
+                            group_name=group_name, sender=sender, content=content,
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.exception("replier 处理异常")
 
             # 2. 计算 priority（命中重点关注群/联系人 → priority=1）
             priority, prio_reason = self._compute_priority(group_name, sender)

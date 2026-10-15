@@ -87,14 +87,31 @@ text/<原文件名>.txt 抽取出的文字稿（复查 + 增量缓存）
     （资料中仅在「出行卦/行人卦」语境下提及父母代表"风雨"…但未单独讲述"测天气"的起卦与用神方法。）
 ```
 
-## 六、P2 待做（接入与配置）
+## 六、P2 已完成（接入与配置）
 
-1. `replier.py` 加**知识库模式**：`@名字` 前缀触发 + 每群 2 分钟 + 随机延迟 5~10s
-   + 队列上限 10 + 同人去重 + `test_only`；
-2. 全局 `kb` 配置段（`enabled/extract_on_start/auto_distill_time/allow_ext/test_only/...`）
-   + 群级 `kb_dir_<群id>` / `kb_on_<群id>` / `kb_at_<群id>`；
-3. 监控页与设置页字段 + 「📥 现在检查并蒸馏」按钮；
-4. 审计 `kb_qa.jsonl`（问题/命中来源/回答/耗时/自检结论）。
+| 项 | 位置 | 说明 |
+|---|---|---|
+| 知识库模式 | `consumer/replier.py` | `KbConfig` + `maybe_reply_kb()` + `_kb_answer_one()` |
+| 独立限速 | `data/reply_state_kb.json` | **不与模板回复共用** `reply_state.json`（互不干扰） |
+| 队列与去重 | `_kb_q` / `_kb_seen` | 冷却期入队（上限 10，满则丢最早）；同人相似问题窗口内只答一次 |
+| 按群配置 | `labels.groups.<gid>.kb_on / kb_at / kb_dir` | 页面可改，改完**热重载**（`reload_kb_group_fields`） |
+| 接线 | `consumer/main.py` | 知识库**先**判、命中就接管 → 不再走模板匹配（避免同一句被答两次） |
+| 全局配置 | 设置页「📚 群知识库问答」 | 总闸 / 测试模式 / 冷却 / 延迟 / 队列 / 日限 / 去重 / 自检 / 检索段数 / 免责语 / 文件类型 / 定时蒸馏 |
+| 群级 UI | 监控页新增一列 | 启用勾选 + 虚拟号名 + 资料目录 + "已蒸馏 N 份资料" |
+| 审计 | `data/kb_qa.jsonl` | 问题 / 命中来源 / 回答 / 自检结论 / 耗时 |
+| 回归 | `wft_kb_reply_check.py`（44 项） | 触发/开关/队列/去重/限速/审计/独立性/热重载/页面字段 |
+
+**默认值**（按用户口径）：`test_only=true` 先观察；每群 `cooldown_s=120`；
+延迟 5~10s；`max_queue=10`；`daily_limit=200`；`dedup_window_s=120`；`self_check=true`。
+
+### P2 途中修掉的 2 个问题
+
+1. **`kb` 段被"原样保存一次"就写进 config.yaml** —— 违反"保存必须隔离"。
+   根因是 `_form_value` 的 `kind == "list"` **无条件返回列表**（不像 `bool`/`select` 那样
+   在"未提交/与当前值相同"时返回 `MISSING`）。已按同样规则修好，
+   `kb.allow_ext` 这类字段不再凭空冒出来（`wft_isolation_check` / `wft_retention_check` 锁着）。
+2. **`wft_group_send_check` 的片段截取会跨段** —— 它用 `seg[:2200]` 兜底，
+   我新增的段落落进了这个窗口 → 误报。改成截到**下一个配置段** `{"key": "` 为止。
 
 ## 七、已知限制
 

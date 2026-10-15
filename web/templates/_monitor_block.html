@@ -29,6 +29,7 @@
             <th style="padding:4px 6px">重点关注的人</th>
             <th style="padding:4px 6px; min-width:260px">🧠 总结提示（提交给大模型）</th>
             <th style="padding:4px 6px">📤 总结发到群内</th>
+            <th style="padding:4px 6px; min-width:230px">📚 知识库问答</th>
         </tr>
         {% for g in group_rows %}
         <tr style="border-top:1px solid #e8f0eb">
@@ -73,6 +74,33 @@
                 </label>
                 {% if g.send_summary %}
                 <div class="hint" style="margin:2px 0 0; color:#c0392b">已开启</div>
+                {% endif %}
+            </td>
+            <td style="padding:6px; vertical-align:top">
+                {# 群知识库问答（2026-10-15 需求）：资料目录 + 开关 + 虚拟号名。
+                   触发规则是「消息以 @<虚拟号名> 开头才回答」，所以名字按群可配。 #}
+                <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer">
+                    <input type="checkbox" name="kb_on_{{ g.id }}" value="1"
+                           {% if g.kb_on %}checked{% endif %}>
+                    <span style="font-size:12px">启用问答</span>
+                </label>
+                <div style="display:flex; gap:4px; margin-top:3px">
+                    <input type="text" name="kb_at_{{ g.id }}" value="{{ g.kb_at or '' }}"
+                           placeholder="虚拟号名（默认小易）"
+                           style="width:110px; font-size:12px; padding:2px 4px">
+                </div>
+                <input type="text" name="kb_dir_{{ g.id }}" value="{{ g.kb_dir or '' }}"
+                       placeholder="资料目录，如 D:\JiangBo\Documents\wechatdocs\弟子群"
+                       style="width:100%; font-size:11px; padding:2px 4px; margin-top:3px">
+                {% if g.kb_on %}
+                <div class="hint" style="margin:2px 0 0; color:#c0392b">
+                    已开启（总闸见设置页「📚 群知识库问答」）
+                </div>
+                {% endif %}
+                {% if g.kb_docs %}
+                <div class="hint" style="margin:2px 0 0">
+                    已蒸馏 {{ g.kb_docs }} 份资料
+                </div>
                 {% endif %}
             </td>
         </tr>
